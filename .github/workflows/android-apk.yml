@@ -1,0 +1,175 @@
+name: Build Android APK
+
+# Produces an installable APK with no paid service in the loop — no EAS, no Play Store,
+# no signing service. GitHub's Linux runners are free and unmetered on public repos, so
+# every push produces a build you can sideload onto the stall phones.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cf-mobile/**'
+      - '.github/workflows/android-apk.yml'
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'API URL baked in as the default (e.g. https://stall.chevellafarms.com)'
+        required: false
+        type: string
+      release:
+        description: 'Also publish the APK as a GitHub Release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write     # needed only when publishing a Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cf-mobile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cf-mobile/package-lock.json
+
+      # Expo's Android build needs a JDK; 17 is what AGP 8.x expects.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # Expo pins exact native-module versions per SDK. Running --fix here means a stale
+      # version in package.json fails loudly in CI rather than silently at runtime.
+      - name: Align native module versions with the Expo SDK
+        run: npx expo install --fix
+
+      - name: Bake in the server defaults
+        env:
+          API_URL: ${{ inputs.api_url || vars.APP_API_URL }}
+          DEVICE_KEY: ${{ secrets.APP_DEVICE_KEY }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const cfg = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            cfg.expo.extra = cfg.expo.extra || {};
+            cfg.expo.extra.defaultApiUrl   = process.env.API_URL    || "";
+            cfg.expo.extra.defaultDeviceKey = process.env.DEVICE_KEY || "";
+            // Monotonic versionCode so a newer APK installs over an older one.
+            cfg.expo.android.versionCode = Number(process.env.GITHUB_RUN_NUMBER || 1);
+            fs.writeFileSync("app.json", JSON.stringify(cfg, null, 2));
+            console.log("apiUrl set:", Boolean(cfg.expo.extra.defaultApiUrl),
+                        "| deviceKey set:", Boolean(cfg.expo.extra.defaultDeviceKey),
+                        "| versionCode:", cfg.expo.android.versionCode);
+          '
+
+      - name: Generate the native Android project
+        run: npx expo prebuild --platform android --no-install
+
+      # A release build needs a keystore. Supply one as a secret for a stable signing
+      # identity across updates; without it we fall back to a debug build, which still
+      # installs fine and is the right default for a first run.
+      - name: Decode signing keystore
+        id: keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/app/release.keystore
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Release keystore decoded."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret — building a debug-signed APK."
+          fi
+
+      - name: Wire the signing config into Gradle
+        if: steps.keystore.outputs.signed == 'true'
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cat >> android/gradle.properties <<EOF
+          CF_STORE_FILE=release.keystore
+          CF_STORE_PASSWORD=$STORE_PASSWORD
+          CF_KEY_ALIAS=$KEY_ALIAS
+          CF_KEY_PASSWORD=$KEY_PASSWORD
+          EOF
+          # Point the existing release signingConfig at our keystore instead of the
+          # debug one Expo scaffolds in by default.
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("android/app/build.gradle")
+          s = p.read_text()
+          block = """
+            release {
+                storeFile file(CF_STORE_FILE)
+                storePassword CF_STORE_PASSWORD
+                keyAlias CF_KEY_ALIAS
+                keyPassword CF_KEY_PASSWORD
+            }
+          """
+          s = re.sub(r"signingConfigs\s*\{", "signingConfigs {\n" + block, s, count=1)
+          s = s.replace("signingConfig signingConfigs.debug\n            shrinkResources",
+                        "signingConfig signingConfigs.release\n            shrinkResources")
+          s = re.sub(r"(buildTypes\s*\{[\s\S]*?release\s*\{[\s\S]*?)signingConfig signingConfigs\.debug",
+                     r"\1signingConfig signingConfigs.release", s, count=1)
+          p.write_text(s)
+          print("signing config patched")
+          PY
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x ./gradlew
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Collect the APK
+        id: apk
+        run: |
+          APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK" || { echo "No APK produced"; exit 1; }
+          mkdir -p ../dist
+          cp "$APK" "../dist/chevella-scanner-v${GITHUB_RUN_NUMBER}.apk"
+          ls -lh ../dist
+          echo "path=dist/chevella-scanner-v${GITHUB_RUN_NUMBER}.apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cf-scanner-apk
+          path: dist/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Publish as a Release
+        if: inputs.release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: scanner-v${{ github.run_number }}
+          name: Chevella Scanner v${{ github.run_number }}
+          files: dist/*.apk
+          body: |
+            Android APK for the Chevella Farms stall scanner.
+
+            **Install:** download the `.apk` on each stall phone, then allow
+            *Settings → Apps → Special access → Install unknown apps* for your browser.
+
+            Signed with ${{ steps.keystore.outputs.signed == 'true' && 'the release keystore' || 'a debug key (set ANDROID_KEYSTORE_BASE64 for a stable signing identity)' }}.

@@ -1,0 +1,21 @@
+# cf-ocr — visiting-card OCR, fully local, no API keys, no per-call cost.
+#
+# Engine choice: PP-OCRv5 (Baidu PaddleOCR's current detection+recognition pair) served
+# through RapidOCR's ONNX Runtime build. This is the strongest freely-licensed OCR stack
+# for dense, small, mixed-case Latin text on cluttered backgrounds — which is exactly what
+# a business card is. The ONNX route is used instead of PaddlePaddle on purpose: same
+# weights, ~40 MB of model files instead of a ~2 GB framework, and it runs on plain CPU,
+# so the service fits on the cheapest VPS you can rent.
+rapidocr==3.4.3
+onnxruntime==1.20.1
+
+# Headless OpenCV: rapidocr pulls opencv-python by default, which links libGL and fails to
+# import in a slim image. The headless build is the same library minus the GUI backends.
+opencv-python-headless==4.10.0.84
+numpy==2.1.3
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+Pillow==11.1.0
+pillow-heif==0.21.0

@@ -1,0 +1,135 @@
+/* The one page strangers see. Designed for a phone held one-handed, straight after a scan:
+   the primary action has to be reachable with a thumb and obvious within a second. */
+
+.cf-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background:
+    radial-gradient(900px 420px at 50% -8%, #15543f 0%, transparent 70%),
+    linear-gradient(180deg, #0b3d2e 0%, #072a20 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 26px 18px 34px;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #fff;
+}
+
+.cf-brand { text-align: center; margin-bottom: 20px; }
+.cf-brand b { display: block; font-size: 1.22rem; letter-spacing: -.01em; }
+.cf-brand span { display: block; font-size: .78rem; color: #8fbfa6; margin-top: 2px; font-style: italic; }
+
+.cf-card {
+  width: 100%;
+  max-width: 420px;
+  background: #fff;
+  color: #17201c;
+  border-radius: 20px;
+  padding: 26px 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .34);
+  text-align: center;
+}
+
+.cf-avatar {
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  margin: 0 auto 14px;
+  background: linear-gradient(145deg, #2e7d52, #0b3d2e);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+
+.cf-name { font-size: 1.42rem; font-weight: 700; letter-spacing: -.015em; margin: 0; }
+.cf-role { color: #6b746f; font-size: .92rem; margin: 3px 0 0; }
+.cf-org { color: #125441; font-weight: 650; font-size: .95rem; margin: 9px 0 0; }
+
+.cf-meta {
+  margin: 18px 0 20px;
+  padding: 14px 0;
+  border-top: 1px solid #e8e2d6;
+  border-bottom: 1px solid #e8e2d6;
+  display: grid;
+  gap: 9px;
+  text-align: left;
+  font-size: .9rem;
+}
+.cf-meta a, .cf-meta span { color: #17201c; text-decoration: none; display: flex; gap: 10px; align-items: baseline; }
+.cf-meta .k { color: #8a938e; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; min-width: 66px; font-weight: 700; }
+.cf-meta .v { font-variant-numeric: tabular-nums; word-break: break-word; }
+.cf-meta a .v { color: #125441; font-weight: 600; }
+
+/* The hierarchy is deliberate: saving the contact is the whole point of the QR, so it is
+   the only filled button. WhatsApp is second. Everything else is a quiet link. */
+.cf-save {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  padding: 16px;
+  font-size: 1.04rem;
+  font-weight: 700;
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #2e7d52, #16623f);
+  color: #fff;
+  text-decoration: none;
+  box-shadow: 0 6px 18px rgba(22, 98, 63, .32);
+  cursor: pointer;
+}
+.cf-save:active { transform: translateY(1px); }
+
+.cf-wa {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 15px;
+  font-size: 1rem;
+  font-weight: 700;
+  border-radius: 14px;
+  background: #25d366;
+  color: #04301a;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+}
+
+.cf-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.cf-mini {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 13px;
+  border-radius: 14px;
+  background: #f3ede2;
+  color: #0b3d2e;
+  font-weight: 650;
+  font-size: .92rem;
+  text-decoration: none;
+  border: 1px solid #e3ddd1;
+}
+
+.cf-hint { font-size: .78rem; color: #8a938e; margin: 14px 0 0; line-height: 1.45; }
+.cf-event { font-size: .76rem; color: #8a938e; margin-top: 16px; }
+
+.cf-foot { max-width: 420px; text-align: center; margin-top: 22px; font-size: .74rem; color: #7fae96; line-height: 1.6; }
+.cf-foot a { color: #b9dcc8; }
+
+.cf-gone { max-width: 420px; background: #fff; color: #17201c; border-radius: 20px; padding: 32px 24px; text-align: center; }
+.cf-gone h1 { font-size: 1.2rem; }
+.cf-gone p { color: #6b746f; font-size: .92rem; }
+
+@media (prefers-color-scheme: dark) {
+  /* The card stays light on purpose — it reads as a physical visiting card, and the
+     contrast against the dark page is what makes the Save button unmissable. */
+  .cf-card, .cf-gone { background: #fdfcf9; }
+}

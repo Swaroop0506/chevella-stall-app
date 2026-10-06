@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "Chevella Scanner",
+    "slug": "chevella-scanner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "chevellascanner",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b3d2e"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.chevellafarms.scanner",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b3d2e"
+      },
+      "permissions": ["android.permission.CAMERA"],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO"
+      ],
+      "edgeToEdgeEnabled": true
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Chevella Scanner uses the camera to photograph visiting cards at the stall.",
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
+    "extra": {
+      "//": "Build-time defaults. The APK workflow injects the real values from repo secrets, and the setup screen can still override them on the phone.",
+      "defaultApiUrl": "",
+      "defaultDeviceKey": ""
+    }
+  }
+}

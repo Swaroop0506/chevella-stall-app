@@ -1,0 +1,114 @@
+# Chevella Farms Stall App — the whole system on one host.
+#
+#   cp .env.example .env     # fill in the secrets and PUBLIC_BASE_URL
+#   docker compose up -d --build
+#   docker compose exec api npm run migrate
+#
+# Everything here is open source and free to run. There is no external service to sign up
+# for: Postgres stores the data, the card photos sit on a local volume, and OCR runs in the
+# ocr container on CPU.
+
+name: chevella-stall
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-chevella_stall}
+      # Deterministic collation, so ORDER BY does not change if the base image does.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cf} -d ${POSTGRES_DB:-chevella_stall}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [cf-net]
+
+  ocr:
+    build: ./cf-ocr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: INFO
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-12}
+      OMP_NUM_THREADS: 2
+    # OCR is the only CPU-hungry part. Capping it keeps a burst of scans from starving
+    # Postgres on a small VPS.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    networks: [cf-net]
+
+  api:
+    build: ./cf-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      ocr:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      DEVICE_API_KEY: ${DEVICE_API_KEY:?set DEVICE_API_KEY in .env}
+      IP_HASH_SALT: ${IP_HASH_SALT:-chevella-salt}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      OCR_URL: http://ocr:8000
+      OCR_TIMEOUT_MS: ${OCR_TIMEOUT_MS:-60000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-12}
+      STORAGE_DIR: /app/storage
+      APK_DOWNLOAD_URL: ${APK_DOWNLOAD_URL:-}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Chevella Admin}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@chevellafarms.com}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      BRAND_COMPANY: ${BRAND_COMPANY:-Chevella Farms}
+      BRAND_LEGAL_NAME: ${BRAND_LEGAL_NAME:-Frister Foods Pvt Ltd}
+      BRAND_TAGLINE: ${BRAND_TAGLINE:-The land of coconut goodness}
+      BRAND_WEBSITE: ${BRAND_WEBSITE:-https://www.chevellafarms.com/}
+      BRAND_PHONE: ${BRAND_PHONE:-+919701221934}
+      BRAND_EMAIL: ${BRAND_EMAIL:-info@fristerfoods.com}
+      BRAND_ADDRESS: ${BRAND_ADDRESS:-}
+    volumes:
+      # The card photos. Back this up — it is the one thing that cannot be regenerated.
+      - card-storage:/app/storage
+    networks: [cf-net]
+
+  admin:
+    build: ./cf-admin
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      API_INTERNAL_URL: http://api:4000
+    networks: [cf-net]
+
+  # Single public entry point, so there is one port to open and one certificate to manage.
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [admin, api]
+    ports:
+      - "${HTTP_PORT:-3000}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [cf-net]
+
+volumes:
+  db-data:
+  card-storage:
+
+networks:
+  cf-net:
+    driver: bridge

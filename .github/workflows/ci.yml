@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ocr-parser:
+    name: OCR field parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The parser is deliberately dependency-free, so these run in seconds without
+      # downloading 40 MB of ONNX weights.
+      - run: python -m unittest discover -s tests -t .
+        working-directory: cf-ocr
+
+  api:
+    name: API smoke test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cf
+          POSTGRES_PASSWORD: cf
+          POSTGRES_DB: chevella_stall_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U cf"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://cf:cf@localhost:5432/chevella_stall_test
+      JWT_SECRET: ci-jwt-secret-not-a-real-one
+      DEVICE_API_KEY: ci-device-key
+      SEED_ADMIN_EMAIL: ci@example.com
+      SEED_ADMIN_PASSWORD: ci-password-123456
+      PUBLIC_BASE_URL: http://localhost:3000
+      OCR_URL: http://localhost:9       # intentionally dead: proves OCR failure degrades gracefully
+      OCR_TIMEOUT_MS: 2000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cf-api/package-lock.json
+
+      - run: npm ci
+        working-directory: cf-api
+
+      - run: npm run migrate
+        working-directory: cf-api
+
+      - name: Boot the API
+        working-directory: cf-api
+        run: |
+          node src/server.js & echo $! > /tmp/api.pid
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:4000/health && break
+            sleep 1
+          done
+
+      - name: Exercise the core flows
+        working-directory: cf-api
+        run: bash test/smoke.sh
+
+      - run: kill "$(cat /tmp/api.pid)" || true
+        if: always()
+
+  admin-build:
+    name: Admin build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cf-admin/package-lock.json
+      - run: npm ci
+        working-directory: cf-admin
+      - run: npm run build
+        working-directory: cf-admin
+        env:
+          API_INTERNAL_URL: http://localhost:4000
+
+  images:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build cf-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./cf-api
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build cf-admin image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./cf-admin
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # cf-ocr is built last and separately: it downloads the PP-OCRv5 weights, so it is
+      # much slower than the other two and should not hold them up.
+      - name: Build cf-ocr image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./cf-ocr
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

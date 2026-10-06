@@ -1,0 +1,38 @@
+# secrets — only .env.example is committed
+.env
+.env.local
+.env.*.local
+*.keystore
+*.jks
+google-services.json
+
+# dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# builds
+.next/
+out/
+dist/
+build/
+cf-mobile/android/
+cf-mobile/ios/
+*.apk
+*.aab
+
+# uploaded card photos and generated QR files — runtime data, not source
+cf-api/storage/**
+!cf-api/storage/**/.gitkeep
+
+# tooling
+.DS_Store
+*.log
+npm-debug.log*
+.expo/
+.eslintcache
+coverage/
+.idea/
+.vscode/
