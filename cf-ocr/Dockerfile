@@ -11,13 +11,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# libglib is the only system library the headless OpenCV build still wants.
+# libglib is all the *headless* OpenCV build needs. The rest are here because RapidOCR
+# declares a dependency on plain `opencv-python`, so pip installs it alongside the headless
+# build we asked for, and whichever one ends up providing `cv2` may then try to dlopen the
+# GUI stack. Shipping these few libs is more robust than fighting pip's resolver.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libglib2.0-0 curl \
+ && apt-get install -y --no-install-recommends \
+      libglib2.0-0 libgl1 libxcb1 libxext6 libsm6 libxrender1 curl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install, then force the headless build to win: it is the one that is actually safe to
+# import in a container, and it keeps the image smaller.
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless==4.10.0.84 \
+ && python -c "import cv2; print('cv2', cv2.__version__, 'imports cleanly')"
 
 COPY src ./src
 
