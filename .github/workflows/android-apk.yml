@@ -47,7 +47,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The runner image already ships the Android SDK, and Gradle pulls whatever build
+      # tools and platform it needs itself. This step is here only to accept the licences
+      # and export ANDROID_HOME — hence the empty package list. Leaving the default
+      # (`tools platform-tools`) fails, because `tools` was removed from the SDK years ago.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
