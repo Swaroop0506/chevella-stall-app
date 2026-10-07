@@ -18,6 +18,12 @@ JAR="$(mktemp)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$JAR" "$TMP"' EXIT
 
+# Capture ids must be unique per run. They are idempotency keys on the server, so reusing
+# a fixed string means a second run silently gets the *first* run's lead back — attached to
+# the first run's event — and every count afterwards is wrong. CI never noticed because it
+# always starts from an empty database.
+RUN="$(date +%s)-$$"
+
 pass() { printf '  \033[32mok\033[0m   %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; exit 1; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
@@ -156,7 +162,7 @@ open('$TMP/card.png','wb').write(png)
 
 RESP=$(curl -s -H "x-api-key: $DEVICE_KEY" -X POST "$API/api/v1/leads" \
   -F "card=@$TMP/card.png" -F "event_id=$EVENT_ID" -F "captured_by=SmokeBot" \
-  -F "client_capture_id=smoke-001" -F "full_name=Test Lead" \
+  -F "client_capture_id=smoke-$RUN-001" -F "full_name=Test Lead" \
   -F "phone_primary=9876543210" -F "interest_tags=Export,HoReCa")
 LEAD_ID=$(echo "$RESP" | json "d['lead']['id']")
 [ -n "$LEAD_ID" ] || fail "lead was not created: $RESP"
@@ -171,28 +177,80 @@ echo "$RESP" | json "d['lead']['phone_primary']" | grep -q '+919876543210' \
 pass "client-supplied fields are normalised"
 
 AGAIN=$(curl -s -H "x-api-key: $DEVICE_KEY" -X POST "$API/api/v1/leads" \
-  -F "card=@$TMP/card.png" -F "event_id=$EVENT_ID" -F "client_capture_id=smoke-001")
+  -F "card=@$TMP/card.png" -F "event_id=$EVENT_ID" -F "client_capture_id=smoke-$RUN-001")
 echo "$AGAIN" | json "d.get('duplicate_submission')" | grep -qi true \
   || fail "re-posting the same capture id created a second lead"
 [ "$(echo "$AGAIN" | json "d['lead']['id']")" = "$LEAD_ID" ] || fail "idempotency returned a different lead"
 pass "offline retry is idempotent"
 
 curl -s -H "x-api-key: $DEVICE_KEY" -X POST "$API/api/v1/app/reconcile" \
-  -H 'Content-Type: application/json' -d '{"capture_ids":["smoke-001","never-sent"]}' \
-  | json "d['known']" | grep -q 'smoke-001' || fail "reconcile did not report the known capture"
+  -H 'Content-Type: application/json' -d '{"capture_ids":["smoke-'"$RUN"'-001","never-sent"]}' \
+  | json "d['known']" | grep -q "smoke-$RUN-001" || fail "reconcile did not report the known capture"
 pass "reconcile reports what the server already holds"
 
 TOTAL=$(curl -s -b "$JAR" "$API/api/v1/leads?event_id=$EVENT_ID" | json "d['total']")
 [ "$TOTAL" = "1" ] || fail "expected exactly 1 lead, found $TOTAL"
 pass "exactly one lead exists after the retry"
 
-# ---------------------------------------------------------------- review + export
+# ---------------------------------------------------------------- review
 
-step "Review and export"
+step "Review"
 curl -s -b "$JAR" -X PATCH "$API/api/v1/leads/$LEAD_ID" -H 'Content-Type: application/json' \
   -d '{"full_name":"Checked Lead","company":"Acme Foods","status":"qualified"}' \
   | json "d['lead']['needs_review']" | grep -qi false || fail "editing did not clear needs_review"
 pass "saving an edit marks the lead reviewed"
+
+# ---------------------------------------------------------------- both sides
+
+step "Both sides of the card"
+
+# A second, visibly different image so front and back cannot be confused for each other.
+python3 -c "
+import struct, zlib
+def chunk(t, d):
+    c = t + d
+    return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c))
+png = (b'\x89PNG\r\n\x1a\n'
+       + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(b'\x00\x00\x00\xff\x00\x00\xff\x00\x00\xff\x00\x00\xff'))
+       + chunk(b'IEND', b''))
+open('$TMP/back.png','wb').write(png)
+"
+
+BACK=$(curl -s -H "x-api-key: $DEVICE_KEY" -X POST "$API/api/v1/leads/$LEAD_ID/back" \
+  -F "card_back=@$TMP/back.png")
+echo "$BACK" | json "d['lead']['card_back_path']" | grep -q 'cards/' \
+  || fail "back photo was not stored: $BACK"
+pass "back attaches to an existing lead"
+
+echo "$BACK" | json "d['lead']['card_back_thumb_path']" | grep -q 'thumbs/' \
+  || fail "back thumbnail was not generated"
+pass "back thumbnail is generated"
+
+# The front must survive untouched — a late back must never overwrite a corrected field.
+echo "$BACK" | json "d['lead']['full_name']" | grep -q 'Checked Lead' \
+  || fail "attaching a back clobbered the corrected name"
+pass "attaching a back leaves corrected front fields alone"
+
+# And both sides in a single upload.
+BOTH=$(curl -s -H "x-api-key: $DEVICE_KEY" -X POST "$API/api/v1/leads" \
+  -F "card=@$TMP/card.png" -F "card_back=@$TMP/back.png" \
+  -F "event_id=$EVENT_ID" -F "captured_by=SmokeBot" -F "client_capture_id=smoke-$RUN-both")
+echo "$BOTH" | json "d['lead']['card_image_path']" | grep -q 'cards/' || fail "front missing"
+echo "$BOTH" | json "d['lead']['card_back_path']" | grep -q 'cards/' || fail "back missing"
+FRONT_P=$(echo "$BOTH" | json "d['lead']['card_image_path']")
+BACK_P=$(echo "$BOTH" | json "d['lead']['card_back_path']")
+[ "$FRONT_P" != "$BACK_P" ] || fail "front and back were stored as the same file"
+pass "both sides upload together and are stored separately"
+
+curl -s -b "$JAR" -o "$TMP/front.bin" "$API/api/v1/files/$FRONT_P"
+curl -s -b "$JAR" -o "$TMP/back.bin" "$API/api/v1/files/$BACK_P"
+cmp -s "$TMP/front.bin" "$TMP/back.bin" && fail "the two stored sides are identical"
+pass "each side serves back its own image"
+
+# ---------------------------------------------------------------- export
+
+step "Export"
 
 curl -s -b "$JAR" -o "$TMP/leads.xlsx" "$API/api/v1/leads/export.xlsx?event_id=$EVENT_ID"
 python3 -c "
@@ -203,8 +261,10 @@ assert bad is None, f'corrupt entry: {bad}'
 names = z.namelist()
 assert any('worksheets/sheet1' in n for n in names), 'no first worksheet'
 assert any('worksheets/sheet2' in n for n in names), 'no summary worksheet'
-assert any(n.startswith('xl/media/') and n.endswith(('.jpeg','.jpg','.png')) for n in names), \
-    'no card photo embedded in the workbook'
+media = [n for n in names if n.startswith('xl/media/') and n.endswith(('.jpeg','.jpg','.png'))]
+assert media, 'no card photo embedded in the workbook'
+# One lead has a front only, one has both sides, so at least three images are expected.
+assert len(media) >= 3, f'expected front and back thumbnails, found {len(media)}'
 " || fail "Excel export is not a valid workbook"
 pass "Excel export opens, has both sheets and embeds the card photo"
 

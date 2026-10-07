@@ -16,7 +16,12 @@ import { prepareImage } from '../../lib/scan-queue';
  * If getUserMedia is refused or unavailable the caller falls back to the OS camera app via
  * an <input capture> element, which is slower but always works.
  */
-export default function Camera({ onCaptured, onClose, onCameraFailed }) {
+/**
+ * @param {object} props
+ * @param {'front'|'back'} props.side  'back' puts it in single-shot mode: shoot the reverse
+ *        of a card already captured, hand the blob back, and close.
+ */
+export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'front' }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const trackRef = useRef(null);
@@ -128,11 +133,11 @@ export default function Camera({ onCaptured, onClose, onCameraFailed }) {
     setShot(null);
   }
 
-  async function keep(andAnnotate) {
+  async function keep(mode) {
     if (!shot) return;
     setBusy(true);
     try {
-      await onCaptured(shot.blob, { annotate: andAnnotate });
+      await onCaptured(shot.blob, { mode });
       discard();
     } finally {
       setBusy(false);
@@ -147,7 +152,11 @@ export default function Camera({ onCaptured, onClose, onCameraFailed }) {
       {!shot && (
         <div className="sc-guide">
           <div className="box"><i /><i /><i /><i /></div>
-          <p>{ready ? 'Fill this box with the card' : 'Starting camera…'}</p>
+          <p>
+            {!ready ? 'Starting camera…'
+              : side === 'back' ? 'Now the BACK of the card'
+              : 'Fill this box with the card'}
+          </p>
         </div>
       )}
 
@@ -167,16 +176,30 @@ export default function Camera({ onCaptured, onClose, onCameraFailed }) {
         </div>
       ) : (
         <div className="sc-confirm">
-          <p>{error || 'Readable? Check the phone number and email are sharp.'}</p>
+          <p>
+            {error || (side === 'back'
+              ? 'Back of the card — the address and GSTIN are usually here.'
+              : 'Readable? Check the phone number and email are sharp.')}
+          </p>
           <div className="row2">
             <button type="button" className="btn-ghost" onClick={discard} disabled={busy}>Retake</button>
-            <button type="button" onClick={() => keep(false)} disabled={busy}>
-              {busy ? 'Saving…' : 'Keep & next'}
+            <button type="button" onClick={() => keep('next')} disabled={busy}>
+              {busy ? 'Saving…' : side === 'back' ? 'Save back' : 'Keep & next'}
             </button>
           </div>
-          <button type="button" className="later" onClick={() => keep(true)} disabled={busy}>
-            Keep and add a note / interest →
-          </button>
+
+          {side === 'front' && (
+            <>
+              {/* The back is where the address lives on most Indian B2B cards, so this is
+                  one tap away rather than buried. */}
+              <button type="button" className="later" onClick={() => keep('back')} disabled={busy}>
+                Keep &amp; shoot the back →
+              </button>
+              <button type="button" className="later" onClick={() => keep('annotate')} disabled={busy}>
+                Keep and add a note / interest →
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

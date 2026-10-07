@@ -152,6 +152,16 @@ CITY_CANONICAL = {
 
 HONORIFICS = {"mr", "mrs", "ms", "dr", "prof", "shri", "sri", "smt", "er", "ca", "adv", "capt"}
 
+# Layout labels printed on the card, usually on the back. "Head Office" scores well as a
+# designation because of "head", and "Our Products" looks like a heading — neither is a
+# person's job title.
+SECTION_HEADINGS = {
+    "head office", "registered office", "regd office", "regd. office", "branch office",
+    "corporate office", "works", "factory", "our products", "products", "our services",
+    "services", "we deal in", "dealing in", "contact us", "reach us", "address",
+    "branches", "our branches", "godown", "warehouse",
+}
+
 NAME_NOISE = {
     "gst", "gstin", "pan", "tin", "cin", "fssai", "iso", "msme", "udyam", "email", "mail",
     "phone", "mobile", "mob", "cell", "tel", "telephone", "fax", "web", "website", "www",
@@ -168,8 +178,12 @@ RE_URL = re.compile(
     r"(/[^\s,;]*)?",
     re.I,
 )
-RE_GSTIN = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][\dA-Z]Z[\dA-Z])\b")
-RE_PAN = re.compile(r"\b([A-Z]{5}\d{4}[A-Z])\b")
+# No trailing \b on purpose. OCR routinely turns the "|" between GSTIN and FSSAI into an
+# "I", producing "...R1ZMIFSSAI:...", and a trailing word boundary would then refuse to
+# match a GSTIN that is perfectly readable. The 15-character shape is specific enough that
+# guarding only the start is safe.
+RE_GSTIN = re.compile(r"(?<![A-Z0-9])(\d{2}[A-Z]{5}\d{4}[A-Z][\dA-Z]Z[\dA-Z])")
+RE_PAN = re.compile(r"(?<![A-Z0-9])([A-Z]{5}\d{4}[A-Z])(?![A-Z0-9])")
 RE_FSSAI = re.compile(r"\b(\d{14})\b")
 RE_PINCODE = re.compile(r"\b([1-9]\d{5})\b")
 
@@ -265,7 +279,10 @@ def to_e164(raw: str, default_cc: str = "91") -> str | None:
         return f"+{d[1:]}"
     if len(d) == 10:
         return f"+{default_cc}{d}"
-    if 8 <= len(d) <= 15:
+    # Anything longer than 12 national digits is not a phone number — it is a licence or
+    # registration number. E.164 caps the whole thing at 15 digits including the country
+    # code, so "+91" plus a 14-digit FSSAI would not even be well-formed.
+    if 8 <= len(d) <= 12:
         return f"+{default_cc}{d}"
     return None
 
@@ -337,6 +354,14 @@ def extract_phones(lines: list[Line]) -> dict:
 
     for ln in lines:
         low = ln.lower
+
+        # Registration numbers live on these lines and are all long digit runs. Mining
+        # them for phone numbers produces confident nonsense.
+        if any(tag in low for tag in
+               ("gstin", "gst no", "fssai", "lic. no", "lic no", "pan ", "pan:",
+                "cin", "udyam", "msme", "iec", "tin ", "tin:", "account no", "a/c")):
+            continue
+
         # Which label, if any, governs this line?
         label = None
         for kind, keys in PHONE_LABELS.items():
@@ -456,7 +481,10 @@ def looks_like_person_name(text: str) -> float:
 
 
 def designation_score(text: str) -> float:
-    words = [w.strip(".,&-") for w in normalise_text(text).lower().replace("/", " ").split()]
+    cleaned = normalise_text(text).lower().strip(" :-")
+    if cleaned in SECTION_HEADINGS:
+        return 0.0
+    words = [w.strip(".,&-") for w in cleaned.replace("/", " ").split()]
     if not words:
         return 0.0
     hits = sum(1 for w in words if w in DESIGNATION_WORDS)
@@ -687,6 +715,72 @@ def parse_card(blocks: list[dict]) -> ParseResult:
 # --------------------------------------------------------------------------- helpers
 
 
+def _same_line(a: Line, b: Line) -> bool:
+    """True when two boxes sit on one visual line of text."""
+    if a.h <= 0 or b.h <= 0:
+        return False
+    top, bottom = max(a.y, b.y), min(a.y + a.h, b.y + b.h)
+    overlap = bottom - top
+    return overlap > 0.5 * min(a.h, b.h)
+
+
+def _merge_line_boxes(lines: list[Line]) -> list[Line]:
+    """Rejoins words the detector split apart.
+
+    PP-OCR's detector regularly cuts a large heading into one box per word: a card whose
+    name is set in 48 pt comes back as 'SRILAKSHMI' + 'TRADERS'. Every downstream
+    heuristic reasons about whole lines — the domain check, the person-name shape test,
+    the company markers — so leaving them split quietly wrecks all three. ('TRADERS' alone
+    matches a company marker and wins, which is exactly the wrong answer.)
+
+    Two boxes are joined when they overlap vertically and the horizontal gap between them
+    is smaller than about one-and-a-half character heights. A real two-column layout has a
+    far wider gutter than that, so columns are left alone.
+    """
+    if not lines:
+        return []
+
+    out: list[Line] = []
+    # Group by line, then order left to right within each.
+    remaining = sorted(lines, key=lambda ln: (ln.y, ln.x))
+    used = [False] * len(remaining)
+
+    for i, ln in enumerate(remaining):
+        if used[i]:
+            continue
+        group = [ln]
+        used[i] = True
+        for j in range(i + 1, len(remaining)):
+            if used[j]:
+                continue
+            if _same_line(ln, remaining[j]):
+                group.append(remaining[j])
+                used[j] = True
+
+        group.sort(key=lambda g: g.x)
+
+        merged = group[0]
+        for nxt in group[1:]:
+            gap = nxt.x - (merged.x + merged.w)
+            if gap > 1.5 * max(merged.h, nxt.h):
+                out.append(merged)       # a genuine column break
+                merged = nxt
+                continue
+            x0 = min(merged.x, nxt.x)
+            y0 = min(merged.y, nxt.y)
+            x1 = max(merged.x + merged.w, nxt.x + nxt.w)
+            y1 = max(merged.y + merged.h, nxt.y + nxt.h)
+            merged = Line(
+                text=f"{merged.text} {nxt.text}".strip(),
+                # The weaker read governs how much the joined line can be trusted.
+                score=min(merged.score, nxt.score),
+                x=x0, y=y0, w=x1 - x0, h=y1 - y0,
+            )
+        out.append(merged)
+
+    return out
+
+
 def _to_lines(blocks: list[dict]) -> list[Line]:
     out: list[Line] = []
     for i, b in enumerate(blocks or []):
@@ -702,6 +796,8 @@ def _to_lines(blocks: list[dict]) -> list[Line]:
             w, h = max(xs) - x, max(ys) - y
         out.append(Line(text=text, score=float(b.get("score", 0.9)),
                         x=x, y=y, w=w, h=h, index=i))
+
+    out = _merge_line_boxes(out)
     out.sort(key=lambda ln: (round(ln.y / 12), ln.x))
     for i, ln in enumerate(out):
         ln.index = i

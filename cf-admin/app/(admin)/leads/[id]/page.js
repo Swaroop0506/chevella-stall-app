@@ -31,6 +31,16 @@ function Confidence({ value }) {
   return <span className={`badge ${cls}`} style={{ marginLeft: 6 }} title="OCR confidence for this field">{pct}%</span>;
 }
 
+/** Says so when a value was read off the reverse, so it does not appear from nowhere. */
+function FromBack({ on }) {
+  if (!on) return null;
+  return (
+    <span className="badge badge-blue" style={{ marginLeft: 6 }} title="Read from the back of the card">
+      back
+    </span>
+  );
+}
+
 export default function LeadDetail({ params }) {
   const { id } = use(params);
   const router = useRouter();
@@ -105,6 +115,7 @@ export default function LeadDetail({ params }) {
   if (!lead) return <p className="hint">Loading…</p>;
 
   const conf = lead.field_confidence || {};
+  const fromBack = lead.back_filled_fields || {};
 
   return (
     <>
@@ -140,25 +151,44 @@ export default function LeadDetail({ params }) {
         {/* ------------------------------------------------ the photo */}
         <div className="stack">
           <div className="card card-tight">
-            <h3>Card photo</h3>
+            <div className="row-between" style={{ marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>Card photo</h3>
+              <span className={`badge ${lead.card_back_path ? 'badge-green' : ''}`}>
+                {lead.card_back_path ? 'both sides' : 'front only'}
+              </span>
+            </div>
+
             {lead.card_image_path ? (
-              <a href={`/api/v1/files/${lead.card_image_path}`} target="_blank" rel="noreferrer">
-                <img
-                  src={`/api/v1/files/${lead.card_image_path}`}
-                  alt="Scanned visiting card"
-                  style={{ width: '100%', borderRadius: 8, border: '1px solid var(--line)', display: 'block' }}
-                />
-              </a>
+              <>
+                <div className="hint" style={{ marginBottom: 4 }}>Front</div>
+                <a href={`/api/v1/files/${lead.card_image_path}`} target="_blank" rel="noreferrer">
+                  <img
+                    src={`/api/v1/files/${lead.card_image_path}`}
+                    alt="Front of the scanned visiting card"
+                    style={{ width: '100%', borderRadius: 8, border: '1px solid var(--line)', display: 'block' }}
+                  />
+                </a>
+              </>
             ) : <p className="hint">No photo stored.</p>}
-            {lead.card_back_path && (
-              <a href={`/api/v1/files/${lead.card_back_path}`} target="_blank" rel="noreferrer">
-                <img
-                  src={`/api/v1/files/${lead.card_back_path}`}
-                  alt="Back of the visiting card"
-                  style={{ width: '100%', borderRadius: 8, border: '1px solid var(--line)', marginTop: 10, display: 'block' }}
-                />
-              </a>
+
+            {lead.card_back_path ? (
+              <>
+                <div className="hint" style={{ margin: '12px 0 4px' }}>Back</div>
+                <a href={`/api/v1/files/${lead.card_back_path}`} target="_blank" rel="noreferrer">
+                  <img
+                    src={`/api/v1/files/${lead.card_back_path}`}
+                    alt="Back of the scanned visiting card"
+                    style={{ width: '100%', borderRadius: 8, border: '1px solid var(--line)', display: 'block' }}
+                  />
+                </a>
+              </>
+            ) : (
+              <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
+                No back captured. On most Indian B2B cards the address and GSTIN are printed
+                on the reverse — worth asking staff to shoot both sides.
+              </p>
             )}
+
             <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
               Click to open full size. Always check the photo before trusting a field.
             </p>
@@ -169,7 +199,11 @@ export default function LeadDetail({ params }) {
             <table style={{ fontSize: '.84rem' }}>
               <tbody>
                 <tr><td>Engine</td><td className="mono">{lead.ocr_engine || '—'}</td></tr>
-                <tr><td>Confidence</td><td>{lead.ocr_confidence != null ? `${Math.round(lead.ocr_confidence * 100)}%` : '—'}</td></tr>
+                <tr><td>Front conf.</td><td>{lead.ocr_confidence != null ? `${Math.round(lead.ocr_confidence * 100)}%` : '—'}</td></tr>
+                <tr>
+                  <td>Back conf.</td>
+                  <td>{lead.ocr_back_confidence != null ? `${Math.round(lead.ocr_back_confidence * 100)}%` : '—'}</td>
+                </tr>
                 <tr><td>Time</td><td>{lead.ocr_ms ? `${lead.ocr_ms} ms` : '—'}</td></tr>
               </tbody>
             </table>
@@ -199,7 +233,8 @@ export default function LeadDetail({ params }) {
                   whiteSpace: 'pre-wrap', fontSize: '.76rem', maxHeight: 280, overflowY: 'auto',
                 }}
               >
-                {lead.ocr_raw_text || '(nothing was read)'}
+                {`— FRONT —\n${lead.ocr_raw_text || '(nothing was read)'}`}
+                {lead.ocr_back_text ? `\n\n— BACK —\n${lead.ocr_back_text}` : ''}
               </pre>
             )}
           </div>
@@ -215,6 +250,7 @@ export default function LeadDetail({ params }) {
                   <label htmlFor={`f-${key}`}>
                     {label}
                     <Confidence value={conf[key]} />
+                    <FromBack on={fromBack[key]} />
                   </label>
                   <input
                     id={`f-${key}`}

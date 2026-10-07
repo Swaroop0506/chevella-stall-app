@@ -14,9 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.parse import (  # noqa: E402
-    address_score, company_score, designation_score, extract_emails, extract_phones,
-    fix_email_ocr, looks_like_person_name, name_from_email, parse_card, split_address,
-    to_e164, Line,
+    address_score, company_score, designation_score, extract_emails, extract_ids,
+    extract_phones, fix_email_ocr, looks_like_person_name, name_from_email, parse_card,
+    split_address, to_e164, Line,
 )
 
 
@@ -234,6 +234,103 @@ class TestWholeCards(unittest.TestCase):
             "9701221934",
         ))
         self.assertNotEqual(res.fields.get("designation"), res.fields.get("company"))
+
+
+def boxes_at(*items):
+    """Places text at explicit (x, y, w, h) — for testing line grouping."""
+    out = []
+    for text, x, y, w, h in items:
+        out.append({
+            "text": text, "score": 0.99,
+            "box": [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+        })
+    return out
+
+
+class TestSplitHeadings(unittest.TestCase):
+    """PP-OCR's detector cuts large headings into one box per word."""
+
+    def test_words_on_one_line_are_rejoined(self):
+        res = parse_card(boxes_at(
+            ("SRILAKSHMI", 60, 80, 290, 50),
+            ("TRADERS", 365, 80, 210, 50),
+            ("Ravi Kumar Reddy", 60, 240, 330, 38),
+            ("ravi.kumar@srilakshmitraders.com", 60, 440, 420, 26),
+            ("Mobile: 98765 43210", 60, 400, 280, 26),
+        ))
+        # Without rejoining, "TRADERS" alone matches a company marker and wins.
+        self.assertEqual(res.fields["company"], "Srilakshmi Traders")
+        self.assertEqual(res.fields["full_name"], "Ravi Kumar Reddy")
+
+    def test_a_real_column_gap_is_not_merged(self):
+        res = parse_card(boxes_at(
+            ("Ravi Kumar Reddy", 60, 240, 300, 38),
+            ("98765 43210", 700, 240, 220, 38),   # far right: a second column
+        ))
+        self.assertEqual(res.fields["full_name"], "Ravi Kumar Reddy")
+        self.assertEqual(res.fields["phone_primary"], "+919876543210")
+
+
+class TestRegistrationNumbers(unittest.TestCase):
+    def test_gstin_survives_a_misread_separator(self):
+        # OCR turns the "|" between GSTIN and FSSAI into an "I".
+        got = extract_ids("GSTIN:36AABCU9603R1ZMIFSSAI:10819004000123")
+        self.assertEqual(got["gstin"], "36AABCU9603R1ZM")
+
+    def test_plain_gstin(self):
+        self.assertEqual(extract_ids("GSTIN: 36AABCU9603R1ZM")["gstin"], "36AABCU9603R1ZM")
+
+    def test_fssai_is_not_a_phone_number(self):
+        got = extract_phones([Line(text="GSTIN:36AABCU9603R1ZM FSSAI:10819004000123", score=0.99)])
+        self.assertEqual(got["mobiles"], [])
+        self.assertEqual(got["landlines"], [])
+
+    def test_long_digit_runs_are_rejected_outright(self):
+        # 14 digits with a +91 prefix would be 16 — not a valid E.164 number.
+        self.assertIsNone(to_e164("10819004000123"))
+
+    def test_twelve_digits_still_allowed(self):
+        self.assertEqual(to_e164("919701221934"), "+919701221934")
+
+    def test_landline_on_the_same_card_still_found(self):
+        got = extract_phones([
+            Line(text="Landline: 040-27845612", score=0.99),
+            Line(text="GSTIN:36AABCU9603R1ZMIFSSAI:10819004000123", score=0.99),
+        ])
+        self.assertEqual(got["landlines"], ["+914027845612"])
+
+
+class TestSectionHeadings(unittest.TestCase):
+    def test_headings_are_not_designations(self):
+        for heading in ["Head Office", "Our Products", "Registered Office", "Branches"]:
+            self.assertEqual(designation_score(heading), 0.0, heading)
+
+    def test_real_designations_still_score(self):
+        self.assertGreaterEqual(designation_score("Head - Procurement"), 0.45)
+
+
+class TestCardBack(unittest.TestCase):
+    """A back with the address and no contact details — the common real layout."""
+
+    def test_back_yields_address_and_ids(self):
+        res = parse_card(blocks(
+            ("SRI LAKSHMI TRADERS", 34),
+            ("Our Products", 22),
+            "Coconut Water Powder I Tender Coconut I Dry Fruits",
+            ("Head Office", 22),
+            "Plot 27, Gandhi Market Road, Secunderabad - 500003,",
+            "Telangana, India",
+            "Landline: 040-27845612",
+            "GSTIN:36AABCU9603R1ZMIFSSAI:10819004000123",
+        ))
+        f = res.fields
+        self.assertIn("Secunderabad", f["address"])
+        self.assertEqual(f["city"], "Secunderabad")
+        self.assertEqual(f["state"], "Telangana")
+        self.assertEqual(f["pincode"], "500003")
+        self.assertEqual(f["gstin"], "36AABCU9603R1ZM")
+        self.assertEqual(f["phone_primary"], "+914027845612")
+        self.assertNotIn("designation", f)        # "Head Office" is not a job title
 
 
 if __name__ == "__main__":

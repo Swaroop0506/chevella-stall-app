@@ -54,14 +54,24 @@ export const api = {
   reconcile: (captureIds) => call('POST', '/app/reconcile', { json: { capture_ids: captureIds } }),
   patchLead: (id, fields) => call('PATCH', `/leads/${id}`, { json: fields }),
 
+  /** Attaches the back of a card to a lead the server already has. */
+  async uploadBack(leadId, uri, name) {
+    const form = new FormData();
+    form.append('card_back', { uri, name: `${name}-back.jpg`, type: 'image/jpeg' });
+    return call('POST', `/leads/${leadId}/back`, { form, timeoutMs: 90000 });
+  },
+
   /**
    * Uploads one card. OCR runs server-side, so this can take a while on a weak CPU —
    * hence the long timeout. The caller's queue handles the failure case.
    */
-  async uploadCard({ uri, eventId, captureId, capturedBy, deviceLabel, capturedAt, notes, tags }) {
+  async uploadCard({ uri, backUri, eventId, captureId, capturedBy, deviceLabel, capturedAt, notes, tags }) {
     const form = new FormData();
     // React Native's FormData takes this {uri, name, type} shape rather than a Blob.
     form.append('card', { uri, name: `${captureId}.jpg`, type: 'image/jpeg' });
+    if (backUri) {
+      form.append('card_back', { uri: backUri, name: `${captureId}-back.jpg`, type: 'image/jpeg' });
+    }
     form.append('event_id', eventId);
     form.append('client_capture_id', captureId);
     if (capturedBy) form.append('captured_by', capturedBy);

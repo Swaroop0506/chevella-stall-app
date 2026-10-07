@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '../components/ui';
-import { enqueueCapture } from '../lib/queue';
+import { attachBack, enqueueCapture } from '../lib/queue';
 import { T } from '../theme';
 
 /**
@@ -14,7 +14,9 @@ import { T } from '../theme';
  * three seconds, a blurry card costs a lead nobody can follow up. The guide rectangle is
  * 1.75:1, the ISO 7810 ID-1 ratio that virtually every visiting card uses.
  */
-export default function CameraScreen({ navigation }) {
+export default function CameraScreen({ navigation, route }) {
+  // When set, we are photographing the reverse of a card captured moments ago.
+  const backForId = route?.params?.backFor || null;
   const camera = useRef(null);
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
@@ -60,8 +62,26 @@ export default function CameraScreen({ navigation }) {
   async function keepAndContinue() {
     setBusy(true);
     try {
+      if (backForId) {
+        await attachBack(backForId, { uri: shot.uri });
+        setShot(null);
+        navigation.goBack();
+        return;
+      }
       await enqueueCapture({ uri: shot.uri });
       setShot(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Saves the front, then stays on the camera to shoot the reverse. */
+  async function keepAndShootBack() {
+    setBusy(true);
+    try {
+      const entry = await enqueueCapture({ uri: shot.uri });
+      setShot(null);
+      navigation.setParams({ backFor: entry.id });
     } finally {
       setBusy(false);
     }
@@ -85,15 +105,31 @@ export default function CameraScreen({ navigation }) {
         <Image source={{ uri: shot.uri }} style={s.preview} resizeMode="contain" />
         <View style={[s.confirmBar, { paddingBottom: insets.bottom + 16 }]}>
           <Text style={s.confirmHint}>
-            Readable? Check the phone number and email are sharp.
+            {backForId
+              ? 'Back of the card — the address and GSTIN are usually here.'
+              : 'Readable? Check the phone number and email are sharp.'}
           </Text>
           <View style={{ flexDirection: 'row', gap: 10 }}>
             <Button title="Retake" variant="secondary" onPress={() => setShot(null)} style={{ flex: 1 }} />
-            <Button title="Keep & next" onPress={keepAndContinue} busy={busy} style={{ flex: 1.3 }} />
+            <Button
+              title={backForId ? 'Save back' : 'Keep & next'}
+              onPress={keepAndContinue}
+              busy={busy}
+              style={{ flex: 1.3 }}
+            />
           </View>
-          <Pressable onPress={keepAndAnnotate} disabled={busy} style={{ paddingVertical: 12 }}>
-            <Text style={s.linkish}>Keep and add a note / interest →</Text>
-          </Pressable>
+          {!backForId && (
+            <>
+              {/* Most Indian B2B cards print the address only on the reverse, so this is
+                  one tap away rather than buried in a menu. */}
+              <Pressable onPress={keepAndShootBack} disabled={busy} style={{ paddingVertical: 11 }}>
+                <Text style={s.linkish}>Keep &amp; shoot the back →</Text>
+              </Pressable>
+              <Pressable onPress={keepAndAnnotate} disabled={busy} style={{ paddingVertical: 11 }}>
+                <Text style={s.linkish}>Keep and add a note / interest →</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       </View>
     );
@@ -111,7 +147,9 @@ export default function CameraScreen({ navigation }) {
           <View style={[s.corner, s.bl]} />
           <View style={[s.corner, s.br]} />
         </View>
-        <Text style={s.guideText}>Fill this box with the card</Text>
+        <Text style={s.guideText}>
+          {backForId ? 'Now the BACK of the card' : 'Fill this box with the card'}
+        </Text>
       </View>
 
       <View style={[s.shutterBar, { paddingBottom: insets.bottom + 18 }]}>

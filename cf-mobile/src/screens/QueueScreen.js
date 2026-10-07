@@ -18,7 +18,7 @@ const ERRORS = {
   event_not_found: 'event missing on server',
 };
 
-function Row({ item, onRemove }) {
+function Row({ item, onRemove, onAddBack }) {
   const st = STATUS[item.status] || STATUS.pending;
   const when = new Date(item.capturedAt).toLocaleTimeString('en-IN', {
     timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
@@ -54,6 +54,15 @@ function Row({ item, onRemove }) {
           <View style={{ backgroundColor: st.bg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999 }}>
             <Text style={{ color: st.fg, fontSize: 11, fontWeight: '700' }}>{st.label}</Text>
           </View>
+          {item.hasBack ? (
+            <View style={{ backgroundColor: T.leafSoft, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999 }}>
+              <Text style={{ color: T.green700, fontSize: 11, fontWeight: '700' }}>front + back</Text>
+            </View>
+          ) : (
+            <Pressable onPress={() => onAddBack(item)} hitSlop={8}>
+              <Text style={{ color: T.leaf, fontSize: 11.5, fontWeight: '700' }}>+ add back</Text>
+            </Pressable>
+          )}
           {item.status !== 'done' && item.lastError ? (
             <Text style={{ fontSize: 11.5, color: T.muted, flex: 1 }} numberOfLines={1}>
               {ERRORS[item.lastError] || item.lastError}
@@ -75,7 +84,7 @@ function Row({ item, onRemove }) {
   );
 }
 
-export default function QueueScreen() {
+export default function QueueScreen({ navigation }) {
   const [items, setItems] = useState([]);
   const [syncing, setSyncing] = useState(false);
 
@@ -126,7 +135,13 @@ export default function QueueScreen() {
       <FlatList
         data={items}
         keyExtractor={(i) => i.id}
-        renderItem={({ item }) => <Row item={item} onRemove={confirmRemove} />}
+        renderItem={({ item }) => (
+          <Row
+            item={item}
+            onRemove={confirmRemove}
+            onAddBack={(it) => navigation.navigate('Camera', { backFor: it.id })}
+          />
+        )}
         ListEmptyComponent={
           <Text style={[text.hint, { textAlign: 'center', marginTop: 40 }]}>
             No cards captured yet.

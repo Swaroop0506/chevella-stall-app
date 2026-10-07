@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Camera from './Camera';
 import {
-  annotate, counts, enqueueCapture, flush, getSettings, isConfigured, listQueue,
-  prepareImage, pruneDone, removeItem, saveSettings, scanApi, subscribe,
+  annotate, attachBack, counts, enqueueCapture, flush, getSettings, isConfigured,
+  listQueue, prepareImage, pruneDone, removeItem, saveSettings, scanApi, subscribe,
 } from '../../lib/scan-queue';
 import './scan.css';   // globals.css already comes in via the root layout
 
@@ -30,6 +30,8 @@ export default function ScanPage() {
   const [online, setOnline] = useState(true);
   const [camera, setCamera] = useState(false);
   const [reviewId, setReviewId] = useState(null);
+  // Capture id whose BACK we are about to photograph, or null for a normal front shot.
+  const [backFor, setBackFor] = useState(null);
   const [toast, setToast] = useState(null);
   const fileRef = useRef(null);
   const pendingAnnotate = useRef(false);
@@ -129,14 +131,42 @@ export default function ScanPage() {
 
   // ------------------------------------------------------------- actions
 
-  const onCaptured = useCallback(async (blob, { annotate: wantAnnotate } = {}) => {
+  /**
+   * One handler for every way out of the confirm screen.
+   *
+   * mode 'next'     — queue it and stay on the camera (the fast path for a queue of people)
+   * mode 'back'     — queue it, then immediately reopen the camera for the reverse
+   * mode 'annotate' — queue it and jump to tags/notes
+   */
+  const onCaptured = useCallback(async (blob, { mode = 'next' } = {}) => {
+    // Capturing the reverse of a card captured a moment ago.
+    if (backFor) {
+      await attachBack(backFor, blob);
+      setBackFor(null);
+      setCamera(false);
+      setToast('Back saved.');
+      setTimeout(() => setToast(null), 2000);
+      return null;
+    }
+
     const entry = await enqueueCapture(blob);
-    if (wantAnnotate) {
+
+    if (mode === 'back') {
+      setBackFor(entry.id);
+      return entry;                 // camera stays open, now in back mode
+    }
+    if (mode === 'annotate') {
       setCamera(false);
       setReviewId(entry.id);
       setView('review');
     }
     return entry;
+  }, [backFor]);
+
+  /** "Add back" from the Cards list, for a card already captured. */
+  const shootBackFor = useCallback((id) => {
+    setBackFor(id);
+    setCamera(true);
   }, []);
 
   async function onFilePicked(e) {
@@ -145,6 +175,16 @@ export default function ScanPage() {
     if (!file) return;
     try {
       const { blob } = await prepareImage(file);
+
+      // The OS camera can also be used for the back, when live capture is unavailable.
+      if (backFor) {
+        await attachBack(backFor, blob);
+        setBackFor(null);
+        setToast('Back saved.');
+        setTimeout(() => setToast(null), 2000);
+        return;
+      }
+
       const entry = await enqueueCapture(blob);
       if (pendingAnnotate.current) {
         setReviewId(entry.id);
@@ -261,7 +301,12 @@ export default function ScanPage() {
         )}
 
         {view === 'queue' && (
-          <Queue items={items} onSync={syncNow} onOpen={(id) => { setReviewId(id); setView('review'); }} />
+          <Queue
+            items={items}
+            onSync={syncNow}
+            onOpen={(id) => { setReviewId(id); setView('review'); }}
+            onAddBack={shootBackFor}
+          />
         )}
 
         {view === 'review' && (
@@ -269,6 +314,7 @@ export default function ScanPage() {
             id={reviewId}
             items={items}
             tags={settings?.interestTags?.length ? settings.interestTags : FALLBACK_TAGS}
+            onAddBack={shootBackFor}
             onDone={() => setView('queue')}
           />
         )}
@@ -276,8 +322,9 @@ export default function ScanPage() {
 
       {camera && (
         <Camera
+          side={backFor ? 'back' : 'front'}
           onCaptured={onCaptured}
-          onClose={() => setCamera(false)}
+          onClose={() => { setCamera(false); setBackFor(null); }}
           onCameraFailed={(why) => {
             setCamera(false);
             setToast(
@@ -441,7 +488,7 @@ function Setup({ onDone }) {
 
 // ------------------------------------------------------------------ queue
 
-function Queue({ items, onSync, onOpen }) {
+function Queue({ items, onSync, onOpen, onAddBack }) {
   const pending = items.filter((i) => i.status !== 'done').length;
 
   return (
@@ -482,9 +529,22 @@ function Queue({ items, onSync, onOpen }) {
                 {it.needsReview ? ' · needs review' : ''}
               </small>
             </div>
-            <span className="st" data-s={it.status}>
-              {it.status === 'done' ? 'uploaded' : it.status === 'uploading' ? 'uploading' : 'waiting'}
-            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 5 }}>
+              <span className="st" data-s={it.status}>
+                {it.status === 'done' ? 'uploaded' : it.status === 'uploading' ? 'uploading' : 'waiting'}
+              </span>
+              {it.hasBack ? (
+                <span className="st" data-s="done" title="Both sides captured">front + back</span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-ghost btn-sm"
+                  onClick={(e) => { e.stopPropagation(); onAddBack(it.id); }}
+                >
+                  + back
+                </button>
+              )}
+            </div>
           </div>
         );
       })}
@@ -494,7 +554,7 @@ function Queue({ items, onSync, onOpen }) {
 
 // ------------------------------------------------------------------ review
 
-function Review({ id, items, tags, onDone }) {
+function Review({ id, items, tags, onDone, onAddBack }) {
   const item = items.find((i) => i.id === id);
   const [picked, setPicked] = useState(item?.tags || []);
   const [notes, setNotes] = useState(item?.notes || '');
@@ -593,9 +653,15 @@ function Review({ id, items, tags, onDone }) {
               style={{ width: '100%', justifyContent: 'center', padding: 15 }}>
         {busy ? 'Saving…' : 'Save'}
       </button>
+      {!item.hasBack && (
+        <button type="button" className="btn-ghost" onClick={() => onAddBack(id)}
+                style={{ width: '100%', justifyContent: 'center', marginTop: 10 }}>
+          📷 Photograph the back of this card
+        </button>
+      )}
       <button type="button" className="btn-ghost" onClick={onDone}
               style={{ width: '100%', justifyContent: 'center', marginTop: 10 }}>
-        Back
+        Back to list
       </button>
       {item.status !== 'done' && (
         <button type="button" className="btn-ghost btn-danger" onClick={drop}

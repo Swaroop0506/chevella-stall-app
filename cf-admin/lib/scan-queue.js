@@ -192,11 +192,12 @@ export async function prepareImage(source) {
   return { blob, width: w, height: h };
 }
 
-export async function enqueueCapture(blob, { notes = '', tags = [] } = {}) {
+export async function enqueueCapture(blob, { notes = '', tags = [], backBlob = null } = {}) {
   const s = getSettings();
   const record = {
     id: captureId(),
     blob,
+    backBlob,
     eventId: s.eventId,
     eventName: s.eventName,
     capturedBy: s.staffName,
@@ -286,9 +287,62 @@ async function reconcile(ids) {
   return res.json();
 }
 
+/**
+ * Attaches the back of a card to a lead the server already has.
+ *
+ * Used when the back is photographed after the front has gone up — which is the common
+ * case on a good connection, since the front uploads within a couple of seconds.
+ */
+async function uploadBack(leadId, blob, name) {
+  const form = new FormData();
+  form.append('card_back', blob, `${name}-back.jpg`);
+  const res = await fetch(`/api/v1/leads/${leadId}/back`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+    signal: AbortSignal.timeout(90000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/** Adds or replaces the back on a queued capture, uploaded or not. */
+export async function attachBack(id, backBlob) {
+  const item = await getOne(id);
+  if (!item) return null;
+
+  // Already on the server: send the back straight through rather than re-queueing it.
+  if (item.status === 'done' && item.leadId) {
+    try {
+      const res = await uploadBack(item.leadId, backBlob, item.id);
+      const lead = res.lead || {};
+      return patch(id, {
+        hasBack: true,
+        backPending: false,
+        needsReview: lead.needs_review ?? item.needsReview,
+        fields: {
+          full_name: lead.full_name,
+          company: lead.company,
+          designation: lead.designation,
+          phone_primary: lead.phone_primary,
+          email: lead.email,
+          city: lead.city,
+        },
+        backFilled: res.filled || [],
+      });
+    } catch {
+      // Keep the blob and retry on the next flush.
+      return patch(id, { backBlob, hasBack: true, backPending: true });
+    }
+  }
+
+  return patch(id, { backBlob, hasBack: true, backPending: false });
+}
+
 async function upload(item) {
   const form = new FormData();
   form.append('card', item.blob, `${item.id}.jpg`);
+  if (item.backBlob) form.append('card_back', item.backBlob, `${item.id}-back.jpg`);
   form.append('event_id', item.eventId);
   form.append('client_capture_id', item.id);
   if (item.capturedBy) form.append('captured_by', item.capturedBy);
@@ -371,8 +425,11 @@ export async function flush({ force = false } = {}) {
           },
           lastError: null,
           attempts: item.attempts + 1,
-          // Drop the Blob once the server has it; browser storage quotas are tight.
+          hasBack: Boolean(item.backBlob) || Boolean(item.hasBack),
+          backPending: false,
+          // Drop the Blobs once the server has them; browser storage quotas are tight.
           blob: undefined,
+          backBlob: undefined,
         });
         uploaded++;
       } catch (err) {
@@ -384,6 +441,19 @@ export async function flush({ force = false } = {}) {
         });
         // A dead network fails every remaining item identically; stop early.
         if (err?.name === 'TimeoutError' || err?.name === 'TypeError') break;
+      }
+    }
+
+    // Backs photographed after their front had already gone up, whose own upload failed.
+    for (const item of await listQueue()) {
+      if (item.status !== 'done' || !item.backPending || !item.backBlob || !item.leadId) continue;
+      try {
+        await uploadBack(item.leadId, item.backBlob, item.id);
+        await patch(item.id, { backPending: false, backBlob: undefined });
+        uploaded++;
+      } catch {
+        failed++;
+        break;
       }
     }
 
@@ -400,8 +470,10 @@ export async function counts() {
   const today = istDay(Date.now());
   return {
     total: items.length,
-    pending: items.filter((i) => i.status !== 'done').length,
-    done: items.filter((i) => i.status === 'done').length,
+    // A lead whose front is up but whose back is still waiting is not finished.
+    pending: items.filter((i) => i.status !== 'done' || i.backPending).length,
+    done: items.filter((i) => i.status === 'done' && !i.backPending).length,
+    withBack: items.filter((i) => i.hasBack).length,
     needsReview: items.filter((i) => i.needsReview).length,
     today: items.filter((i) => istDay(i.capturedAt) === today).length,
   };
@@ -413,6 +485,8 @@ export async function pruneDone({ olderThanHours = 24 } = {}) {
   const items = await listQueue();
   let removed = 0;
   for (const it of items) {
+    // Never prune something still holding a back that has not reached the server.
+    if (it.backPending) continue;
     if (it.status === 'done' && new Date(it.capturedAt).getTime() < cutoff) {
       await withStore('readwrite', (store) => store.delete(it.id));
       removed++;

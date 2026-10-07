@@ -140,6 +140,28 @@ install the APK.
 instead* button still works in that case — it goes through the OS camera, which also
 produces a better photo, just with two extra taps.
 
+### Both sides of the card
+
+On Indian B2B cards the reverse is rarely decorative — it usually carries the office
+address, the product list, branch numbers and often the GSTIN, none of which appear on the
+front. Capturing only the front throws that away.
+
+Both scanners offer **Keep & shoot the back →** on the confirm screen, one tap after the
+front, and a **+ back** action in the Cards list for a card already captured. Both sides
+are read by OCR.
+
+The merge rule is deliberate: **the front wins wherever it has a value, the back fills the
+gaps.** The front is authoritative for identity — the name, role and company are printed
+there — while the back supplies the address and registration numbers. It is never a blind
+overwrite in the other direction, because a head-office number on the reverse would
+otherwise replace the mobile of the person actually standing in front of you. A second
+number found on the back lands in *Phone 2*.
+
+A back attached after a human has already corrected a lead never touches those
+corrections. In the admin, every field filled from the reverse is marked with a blue
+`back` badge, and the two sides carry separate OCR confidence scores. Both photos land in
+the Excel export, in their own columns.
+
 ---
 
 ## About the OCR

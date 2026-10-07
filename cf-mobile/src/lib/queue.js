@@ -84,7 +84,7 @@ function captureId() {
  * Compressing here rather than server-side is what makes the queue survive — a hundred
  * raw 12 MP frames would fill the phone.
  */
-export async function enqueueCapture({ uri, notes = '', tags = [] }) {
+export async function enqueueCapture({ uri, notes = '', tags = [], backUri = null }) {
   await ensureDir();
   const s = await getSettings();
   const id = captureId();
@@ -104,6 +104,9 @@ export async function enqueueCapture({ uri, notes = '', tags = [] }) {
   const entry = {
     id,
     uri: dest,
+    backUri,
+    hasBack: Boolean(backUri),
+    backPending: false,
     eventId: s.eventId,
     eventName: s.eventName,
     capturedBy: s.staffName,
@@ -156,6 +159,54 @@ export async function annotate(id, { notes, tags }) {
   return update(id, patch);
 }
 
+/**
+ * Adds or replaces the back of a card, whether or not the front has already uploaded.
+ *
+ * On a good connection the front is usually on the server within a couple of seconds, so
+ * the back normally goes up through its own endpoint; offline it simply rides along with
+ * the front on the next flush.
+ */
+export async function attachBack(id, { uri }) {
+  await ensureDir();
+  const item = (await readQueue()).find((it) => it.id === id);
+  if (!item) return null;
+
+  const shrunk = await ImageManipulator.manipulateAsync(
+    uri,
+    [{ resize: { width: 2200 } }],
+    { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG },
+  );
+  const dest = `${CARD_DIR}${id}-back.jpg`;
+  await FileSystem.moveAsync({ from: shrunk.uri, to: dest });
+  FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+
+  if (item.status === 'done' && item.leadId) {
+    try {
+      const res = await api.uploadBack(item.leadId, dest, item.id);
+      const lead = res.lead || {};
+      await discardFile(dest);
+      return update(id, {
+        hasBack: true,
+        backPending: false,
+        backUri: null,
+        needsReview: lead.needs_review ?? item.needsReview,
+        fields: {
+          full_name: lead.full_name,
+          company: lead.company,
+          designation: lead.designation,
+          phone_primary: lead.phone_primary,
+          email: lead.email,
+          city: lead.city,
+        },
+      });
+    } catch {
+      return update(id, { backUri: dest, hasBack: true, backPending: true });
+    }
+  }
+
+  return update(id, { backUri: dest, hasBack: true, backPending: false });
+}
+
 // ----------------------------------------------------------------- flush
 
 function dueForRetry(item) {
@@ -205,6 +256,7 @@ export async function flush({ force = false } = {}) {
       try {
         const res = await api.uploadCard({
           uri: item.uri,
+          backUri: item.backUri,
           eventId: item.eventId,
           captureId: item.id,
           capturedBy: item.capturedBy,
@@ -231,8 +283,11 @@ export async function flush({ force = false } = {}) {
           duplicateOf: res.possible_duplicate?.full_name || null,
           lastError: null,
           attempts: item.attempts + 1,
+          hasBack: Boolean(item.backUri) || Boolean(item.hasBack),
+          backPending: false,
         });
         await discardFile(item.uri);
+        await discardFile(item.backUri);
         uploaded++;
       } catch (err) {
         failed++;
@@ -243,6 +298,20 @@ export async function flush({ force = false } = {}) {
         });
         // A dead network will fail every remaining item the same way; stop early.
         if (err?.code === 'offline') break;
+      }
+    }
+
+    // Backs photographed after their front had already gone up, whose own upload failed.
+    for (const item of await readQueue()) {
+      if (item.status !== 'done' || !item.backPending || !item.backUri || !item.leadId) continue;
+      try {
+        await api.uploadBack(item.leadId, item.backUri, item.id);
+        await update(item.id, { backPending: false, backUri: null });
+        await discardFile(item.backUri);
+        uploaded++;
+      } catch {
+        failed++;
+        break;
       }
     }
 
@@ -269,8 +338,10 @@ export async function counts() {
   const items = await readQueue();
   return {
     total: items.length,
-    pending: items.filter((it) => it.status !== 'done').length,
-    done: items.filter((it) => it.status === 'done').length,
+    // A lead whose front is up but whose back is still waiting is not finished.
+    pending: items.filter((it) => it.status !== 'done' || it.backPending).length,
+    done: items.filter((it) => it.status === 'done' && !it.backPending).length,
+    withBack: items.filter((it) => it.hasBack).length,
     needsReview: items.filter((it) => it.needsReview).length,
     today: items.filter((it) => isToday(it.capturedAt)).length,
   };
@@ -290,7 +361,9 @@ export async function pruneDone({ olderThanHours = 24 } = {}) {
   const cutoff = Date.now() - olderThanHours * 3600_000;
   const items = await readQueue();
   const keep = items.filter(
-    (it) => it.status !== 'done' || new Date(it.capturedAt).getTime() > cutoff,
+    (it) => it.status !== 'done'
+      || it.backPending                       // still holding a back the server lacks
+      || new Date(it.capturedAt).getTime() > cutoff,
   );
   if (keep.length !== items.length) {
     await writeQueue(keep);
@@ -303,7 +376,10 @@ export async function pruneDone({ olderThanHours = 24 } = {}) {
 export async function removeItem(id) {
   const items = await readQueue();
   const item = items.find((it) => it.id === id);
-  if (item) await discardFile(item.uri);
+  if (item) {
+    await discardFile(item.uri);
+    await discardFile(item.backUri);
+  }
   await writeQueue(items.filter((it) => it.id !== id));
   await emit();
 }

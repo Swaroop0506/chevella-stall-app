@@ -6,6 +6,9 @@ import { storeCardImage, readStorage } from '../lib/images.js';
 import { ocrCard } from '../lib/ocr-client.js';
 import { toE164 } from '../lib/phone.js';
 import { leadsWorkbook, exportFilename } from '../lib/excel.js';
+import {
+  mergeCardFields, mergeConfidence, needsReview as needsReviewFor,
+} from '../lib/merge-card.js';
 
 const router = Router();
 
@@ -59,57 +62,77 @@ router.post(
     }
 
     const stored = await storeCardImage(file.buffer);
+    const skipOcr = String(req.body.skip_ocr || '') === 'true';
 
-    let backPath = null;
-    if (req.files?.card_back?.[0] && req.files?.card?.[0]) {
-      const back = await storeCardImage(req.files.card_back[0].buffer);
-      backPath = back.cardPath;
+    const ocr = skipOcr
+      ? { ok: false, error: 'skipped' }
+      : await ocrCard(stored.ocrBuffer, file.originalname);
+
+    // The back, when the phone sent both sides in one go. Read it too: on Indian B2B
+    // cards the address and GSTIN are usually only on the reverse.
+    let back = null;
+    let backOcr = null;
+    const backFile = req.files?.card?.[0] ? req.files?.card_back?.[0] : null;
+    if (backFile) {
+      back = await storeCardImage(backFile.buffer);
+      backOcr = skipOcr
+        ? { ok: false, error: 'skipped' }
+        : await ocrCard(back.ocrBuffer, backFile.originalname);
     }
 
-    const skipOcr = String(req.body.skip_ocr || '') === 'true';
-    const ocr = skipOcr ? { ok: false, error: 'skipped' } : await ocrCard(stored.ocrBuffer, file.originalname);
+    const { merged, filled } = mergeCardFields(
+      normalisePhones({ ...(ocr.fields || {}) }),
+      normalisePhones({ ...(backOcr?.fields || {}) }),
+    );
 
-    // Fields the phone already corrected win over anything OCR produced.
+    // Fields the phone already corrected beat anything either side's OCR produced.
     const fromClient = {};
     for (const k of PARSED_FIELDS) {
       const v = clean(req.body[k]);
       if (v) fromClient[k] = v;
     }
-    const fields = normalisePhones({ ...(ocr.fields || {}), ...fromClient });
+    const fields = normalisePhones({ ...merged, ...fromClient });
 
-    const needsReview = req.body.needs_review !== undefined
+    const review = req.body.needs_review !== undefined
       ? String(req.body.needs_review) === 'true'
-      : (!ocr.ok || ocr.needs_review !== false);
+      : needsReviewFor(fields, {
+          ocrFailed: !ocr.ok && !skipOcr,
+          imageWarnings: ocr.image_quality?.warnings || [],
+        });
 
     const lead = await one(
       `INSERT INTO leads (
           event_id, client_capture_id, captured_by, device_label, captured_at,
-          card_image_path, card_thumb_path, card_back_path,
+          card_image_path, card_thumb_path, card_back_path, card_back_thumb_path,
           ocr_engine, ocr_version, ocr_raw_text, ocr_blocks, ocr_confidence, ocr_ms,
+          ocr_back_text, ocr_back_confidence, back_filled_fields,
           full_name, designation, company, phone_primary, phone_secondary, whatsapp,
           email, email_secondary, website, address, city, state, pincode, gstin,
           field_confidence, needs_review, interest_tags, notes)
        VALUES ($1,$2,$3,$4, COALESCE($5::timestamptz, now()),
-               $6,$7,$8,
-               $9,$10,$11,$12,$13,$14,
-               $15,$16,$17,$18,$19,$20,
-               $21,$22,$23,$24,$25,$26,$27,$28,
-               $29,$30,$31,$32)
+               $6,$7,$8,$9,
+               $10,$11,$12,$13,$14,$15,
+               $16,$17,$18,
+               $19,$20,$21,$22,$23,$24,
+               $25,$26,$27,$28,$29,$30,$31,$32,
+               $33,$34,$35,$36)
        RETURNING *`,
       [
         event.id, captureId, clean(req.body.captured_by), clean(req.body.device_label),
         clean(req.body.captured_at),
-        stored.cardPath, stored.thumbPath, backPath,
+        stored.cardPath, stored.thumbPath, back?.cardPath || null, back?.thumbPath || null,
         ocr.engine || null, ocr.version || null, ocr.raw_text || null,
         ocr.blocks ? JSON.stringify(ocr.blocks) : null,
         ocr.confidence ?? null, ocr.ms ?? null,
+        backOcr?.raw_text || null, backOcr?.confidence ?? null,
+        Object.keys(filled).length ? JSON.stringify(filled) : null,
         fields.full_name || null, fields.designation || null, fields.company || null,
         fields.phone_primary || null, fields.phone_secondary || null, fields.whatsapp || null,
         fields.email || null, fields.email_secondary || null, fields.website || null,
         fields.address || null, fields.city || null, fields.state || null,
         fields.pincode || null, fields.gstin || null,
-        ocr.field_confidence ? JSON.stringify(ocr.field_confidence) : null,
-        needsReview, normaliseTags(req.body.interest_tags), clean(req.body.notes),
+        JSON.stringify(mergeConfidence(ocr.field_confidence, backOcr?.field_confidence, filled)),
+        review, normaliseTags(req.body.interest_tags), clean(req.body.notes),
       ],
     );
 
@@ -117,8 +140,85 @@ router.post(
 
     res.status(201).json({
       lead,
-      ocr: { ok: ocr.ok, error: ocr.error || null, confidence: ocr.confidence ?? null, ms: ocr.ms },
+      ocr: {
+        ok: ocr.ok,
+        error: ocr.error || null,
+        confidence: ocr.confidence ?? null,
+        ms: ocr.ms,
+        back: backOcr ? { ok: backOcr.ok, confidence: backOcr.confidence ?? null } : null,
+        back_filled: Object.keys(filled),
+      },
       possible_duplicate: dupe,
+    });
+  }),
+);
+
+/**
+ * Attaches the back of a card to a lead that already exists.
+ *
+ * Needed because the two sides are very often captured a moment apart — and because an
+ * offline phone may well have uploaded the front before anyone thought to flip the card
+ * over. Idempotent in the way that matters: sending a back twice simply replaces it.
+ */
+router.post(
+  '/:id/back',
+  requireAdminOrDevice,
+  cardUpload.fields([{ name: 'card_back', maxCount: 1 }, { name: 'card', maxCount: 1 }]),
+  ah(async (req, res) => {
+    const file = req.files?.card_back?.[0] || req.files?.card?.[0];
+    if (!file) throw new HttpError(400, 'missing_card_back', 'Attach the photo as "card_back".');
+
+    const lead = await one('SELECT * FROM leads WHERE id = $1', [req.params.id]);
+    if (!lead) throw new HttpError(404, 'lead_not_found');
+
+    const back = await storeCardImage(file.buffer);
+    const backOcr = String(req.body.skip_ocr || '') === 'true'
+      ? { ok: false, error: 'skipped' }
+      : await ocrCard(back.ocrBuffer, file.originalname);
+
+    // Everything already on the lead is treated as the front — including any correction a
+    // human has since made, which must not be undone by a late back-of-card read.
+    const frontFields = {};
+    for (const k of PARSED_FIELDS) frontFields[k] = lead[k];
+
+    const { merged, filled } = mergeCardFields(
+      frontFields,
+      normalisePhones({ ...(backOcr.fields || {}) }),
+    );
+
+    const review = lead.reviewed_at
+      ? lead.needs_review          // a human already signed this off; leave their verdict
+      : needsReviewFor(merged, { ocrFailed: !backOcr.ok && lead.ocr_engine === null });
+
+    const updated = await one(
+      `UPDATE leads SET
+          card_back_path=$2, card_back_thumb_path=$3,
+          ocr_back_text=$4, ocr_back_confidence=$5,
+          back_filled_fields = COALESCE(back_filled_fields, '{}'::jsonb) || $6::jsonb,
+          field_confidence   = COALESCE(field_confidence,   '{}'::jsonb) || $7::jsonb,
+          full_name=$8, designation=$9, company=$10, phone_primary=$11, phone_secondary=$12,
+          whatsapp=$13, email=$14, email_secondary=$15, website=$16, address=$17,
+          city=$18, state=$19, pincode=$20, gstin=$21,
+          needs_review=$22
+        WHERE id=$1 RETURNING *`,
+      [
+        lead.id, back.cardPath, back.thumbPath,
+        backOcr.raw_text || null, backOcr.confidence ?? null,
+        JSON.stringify(filled),
+        JSON.stringify(mergeConfidence({}, backOcr.field_confidence, filled)),
+        merged.full_name || null, merged.designation || null, merged.company || null,
+        merged.phone_primary || null, merged.phone_secondary || null, merged.whatsapp || null,
+        merged.email || null, merged.email_secondary || null, merged.website || null,
+        merged.address || null, merged.city || null, merged.state || null,
+        merged.pincode || null, merged.gstin || null,
+        review,
+      ],
+    );
+
+    res.json({
+      lead: updated,
+      ocr: { ok: backOcr.ok, error: backOcr.error || null, confidence: backOcr.confidence ?? null },
+      filled: Object.keys(filled),
     });
   }),
 );

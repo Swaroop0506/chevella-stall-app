@@ -35,8 +35,12 @@ const COLUMNS = [
   { header: 'Status',         key: 'status',       width: 12 },
   { header: 'Needs Review',   key: 'needs_review', width: 13 },
   { header: 'OCR Conf.',      key: 'ocr_confidence', width: 10 },
-  { header: 'Card Photo',     key: 'card',         width: 26 },
+  { header: 'Card (front)',   key: 'card',         width: 26 },
+  { header: 'Card (back)',    key: 'card_back',    width: 26 },
 ];
+
+const COL_FRONT = COLUMNS.findIndex((c) => c.key === 'card');
+const COL_BACK = COLUMNS.findIndex((c) => c.key === 'card_back');
 
 const BRAND_GREEN = 'FF0B3D2E';
 const BRAND_SAND = 'FFF3EDE2';
@@ -118,23 +122,37 @@ export async function leadsWorkbook(leads, opts = {}) {
       row.getCell('whatsapp').font = { color: { argb: 'FF0645AD' }, underline: true };
     }
 
-    if (withImages && l.card_thumb_path) {
-      const buf = await readStorage(l.card_thumb_path);
-      if (buf) {
-        const imgId = wb.addImage({ buffer: buf, extension: 'jpeg' });
-        row.height = 92;
-        ws.addImage(imgId, {
-          tl: { col: COLUMNS.length - 1, row: row.number - 1 },
-          ext: { width: 176, height: 110 },
-          editAs: 'oneCell',
-        });
+    // Both sides of the card. The back is where the address and GSTIN usually live, so an
+    // export without it sends people back to the admin console to look things up.
+    const sides = [
+      { thumb: l.card_thumb_path, full: l.card_image_path, col: COL_FRONT, key: 'card', label: 'front' },
+      { thumb: l.card_back_thumb_path, full: l.card_back_path, col: COL_BACK, key: 'card_back', label: 'back' },
+    ];
+
+    for (const side of sides) {
+      if (!side.full && !side.thumb) continue;
+
+      if (withImages && side.thumb) {
+        const buf = await readStorage(side.thumb);
+        if (buf) {
+          const imgId = wb.addImage({ buffer: buf, extension: 'jpeg' });
+          row.height = 92;
+          ws.addImage(imgId, {
+            tl: { col: side.col, row: row.number - 1 },
+            ext: { width: 176, height: 110 },
+            editAs: 'oneCell',
+          });
+          continue;
+        }
       }
-    } else if (l.card_image_path) {
-      row.getCell('card').value = {
-        text: 'open photo',
-        hyperlink: `${config.apiPublicUrl}/api/v1/files/${l.card_image_path}`,
-      };
-      row.getCell('card').font = { color: { argb: 'FF0645AD' }, underline: true };
+
+      if (side.full) {
+        row.getCell(side.key).value = {
+          text: `open ${side.label}`,
+          hyperlink: `${config.apiPublicUrl}/api/v1/files/${side.full}`,
+        };
+        row.getCell(side.key).font = { color: { argb: 'FF0645AD' }, underline: true };
+      }
     }
   }
 
@@ -158,6 +176,7 @@ export async function leadsWorkbook(leads, opts = {}) {
     ['Needing review', leads.filter((l) => l.needs_review).length],
     ['With phone', leads.filter((l) => l.phone_primary).length],
     ['With email', leads.filter((l) => l.email).length],
+    ['Both sides captured', leads.filter((l) => l.card_back_path).length],
     ['', ''],
     ['By status', ''],
     ...Object.entries(byStatus).map(([k, v]) => [`  ${k}`, v]),
