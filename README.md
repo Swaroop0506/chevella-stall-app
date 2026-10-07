@@ -6,9 +6,10 @@ Two jobs, one system, built for a stall at a trade expo:
    code. A visitor scans it and lands on a Chevella-branded page with one big button —
    *Save our contact* — and a *WhatsApp us* button beside it. Two taps and you are in their
    phone book. There is also a QR for the website.
-2. **Get their visiting card into our database.** Staff photograph cards with an Android app
-   that needs no login. The photo and the text read off it land in the admin console, and the
-   whole lot exports to Excel.
+2. **Get their visiting card into our database.** Staff photograph cards — either from a
+   **web link** that needs nothing installed, or from the **Android app**. No login either
+   way. The photo and the text read off it land in the admin console, and the whole lot
+   exports to Excel.
 
 Everything runs on your own server. No subscriptions, no per-scan fees, no third-party OCR
 API — the text recognition runs locally on CPU.
@@ -20,7 +21,7 @@ API — the text recognition runs locally on CPU.
 | Service | What it is | Stack |
 |---|---|---|
 | `cf-api` | REST API, QR + vCard + PDF generation, Excel export | Node 22, Express, Postgres 17 |
-| `cf-admin` | Admin console **and** the public `/c/<code>` contact pages | Next.js 15 (App Router) |
+| `cf-admin` | Admin console, the public `/c/<code>` contact pages, **and** the `/scan` web scanner | Next.js 15 (App Router) |
 | `cf-ocr` | Visiting-card OCR and field extraction | Python 3.12, FastAPI, PP-OCRv5 via ONNX |
 | `cf-mobile` | The Android scanner app | Expo SDK 53, React Native 0.79 |
 
@@ -28,8 +29,8 @@ API — the text recognition runs locally on CPU.
 visitor's phone ──scan QR──▶ cf-admin /c/<code> ──▶ vCard download + WhatsApp deep link
                                    │
 staff phone ──photo──▶ cf-api ──▶ cf-ocr ──▶ fields ──▶ Postgres ──▶ Excel
-   (cf-mobile)          │
-                        └─ card photos on a local volume
+  /scan or the APK       │
+                         └─ card photos on a local volume
 ```
 
 ---
@@ -78,8 +79,10 @@ and the session cookie stays same-origin. Point it with `API_INTERNAL_URL` in
 3. **Download the print pack.** Posters (one A4 per person, QR at ~9 cm — scans from a
    metre away) or table tents (four per A4 with cut guides). The pack always opens with
    the website QR for the backdrop.
-4. **Set up the stall phones** from the *Scanner app* page: install the APK, scan the setup
-   QR to fill in the server address and device key, type your name, pick the event.
+4. **Set up the stall phones** from the *Scanner* page. Quickest route: WhatsApp everyone
+   the web link, they tap it, type their name and pick the event. For the phones that will
+   be on the stall all day, install the APK instead — it keeps uploading after it is
+   closed.
 5. **During the show**, staff tap *Scan a visiting card*, frame it, tap *Keep & next*. That
    is the whole interaction — about three seconds per card. Add interest tags and a note
    when there is a lull.
@@ -97,6 +100,45 @@ The admin offers both per contact:
   contact is small enough to still scan reliably.
 
 Use the page QR unless the venue has genuinely no connectivity.
+
+---
+
+## Two ways to scan a card
+
+Both feed the same lead list. Mix them across phones freely — the only difference is how
+long a phone keeps uploading after the person stops looking at it.
+
+| | **Web link** (`/scan`) | **Android app** |
+|---|---|---|
+| Install | nothing | sideload an APK |
+| Works on | any modern phone, incl. iPhone | Android only |
+| Offline capture | yes (IndexedDB) | yes |
+| Uploads after you close it | **no** — tab must stay open | yes |
+| Best for | ad-hoc helpers, borrowed phones, iPhones | the phones on the stall all three days |
+
+### The web link
+
+**Scanner** in the admin gives you a link and a QR. The link carries the device key in its
+`#fragment`, so staff tap it once and land already connected — all they type is their name.
+
+Why a fragment and not `?k=`: a fragment is never sent to the server, so the key stays out
+of access logs and `Referer` headers. The page consumes it on load and immediately strips
+it from the address bar. It does still sit in the WhatsApp message you sent and in browser
+history — so if you would rather it did not, send the bare `https://…/scan` link and read
+the device key out separately; the setup screen accepts it pasted.
+
+Tell staff to **Add to Home screen**. It then opens full screen with no address bar, and
+the service worker keeps it loading with no signal.
+
+**The one real limitation:** a browser only uploads while its tab is open. The scanner
+shows a **Waiting** counter and warns before you close the tab with cards outstanding, but
+a phone that is locked in a pocket is not uploading. For phones that will run all day,
+install the APK.
+
+**Camera access needs HTTPS.** Over plain `http://` (other than `localhost`) browsers block
+`getUserMedia` outright, and the admin page says so in red. The *Use my phone camera app
+instead* button still works in that case — it goes through the OS camera, which also
+produces a better photo, just with two extra taps.
 
 ---
 

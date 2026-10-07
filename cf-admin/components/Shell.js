@@ -9,7 +9,7 @@ const NAV = [
   { href: '/', label: 'Dashboard', icon: '◆' },
   { href: '/events', label: 'Events & QRs', icon: '▣' },
   { href: '/leads', label: 'Leads', icon: '☰', badge: 'needs_review', warn: true },
-  { href: '/mobile-setup', label: 'Scanner app', icon: '▤' },
+  { href: '/mobile-setup', label: 'Scanner', icon: '▤' },
 ];
 
 export default function Shell({ children }) {

@@ -5,7 +5,13 @@ import { NextResponse } from 'next/server';
 // security boundary.
 const COOKIE = 'cf_session';
 
-const PUBLIC_PREFIXES = ['/c/', '/api/v1/auth/', '/api/v1/public/', '/_next', '/favicon'];
+// The scanner is staff-facing but has no admin session by design — it authenticates to
+// cf-api with the shared device key instead, so it must not be caught by this redirect.
+const PUBLIC_PREFIXES = [
+  '/c/', '/scan',
+  '/api/v1/auth/', '/api/v1/public/', '/api/v1/app/', '/api/v1/leads',
+  '/_next', '/favicon', '/manifest.webmanifest', '/sw.js', '/icon-', '/apple-touch-icon',
+];
 
 export function middleware(req) {
   const { pathname, search } = req.nextUrl;
