@@ -106,6 +106,73 @@ QR for it.
 
 ---
 
+## Deploying to AWS
+
+Two scripts in `deploy/aws/`. `provision.sh` creates the infrastructure from your laptop;
+`bootstrap.sh` runs on the instance itself as user-data and needs no interaction.
+
+```bash
+aws configure                      # once, with a key that can run EC2
+DOMAIN=stall.chevellafarms.com \
+ADMIN_EMAIL=you@chevellafarms.com \
+REGION=ap-south-1 \
+  deploy/aws/provision.sh
+```
+
+It creates a security group (SSH from your IP only, 80 and 443 open), a key pair saved to
+`~/.ssh/chevella-stall.pem`, a t3.medium on Ubuntu 24.04 with a 30 GB encrypted volume,
+and an Elastic IP. Then the instance installs Docker, clones the repo, generates its own
+secrets, builds the images, runs the migrations and starts everything. First boot takes
+8–12 minutes, almost all of it building the OCR image and pulling the PP-OCRv5 weights.
+
+Afterwards, add one DNS record:
+
+```
+stall.chevellafarms.com.    A    <the Elastic IP the script prints>
+```
+
+Caddy gets the Let's Encrypt certificate by itself once that resolves. Admin credentials
+are written to `/root/CREDENTIALS.txt` on the instance — read them once and shred the file.
+
+### Why a single EC2 instance
+
+For a system that runs hard for three days a year, ECS plus RDS would roughly triple the
+bill and add two more moving parts to debug on the morning of the show. One box running
+`docker compose` is the same artefact you run locally, which means a problem at the stall
+can be reproduced on a laptop.
+
+The size is set by OCR, not by traffic. PP-OCRv5 holds its models in memory and each card
+is read six times; with Postgres, Node and Next alongside it, 4 GB is the honest minimum,
+so `t3.medium`. A `t3.small` will OOM mid-scan. The bootstrap also adds 4 GB of swap,
+which is what stops the image build itself being killed.
+
+### Keeping the bill down
+
+The instance only has to be running during the event.
+
+```bash
+aws ec2 stop-instances  --instance-ids <id> --region ap-south-1   # after the show
+aws ec2 start-instances --instance-ids <id> --region ap-south-1   # the morning of
+```
+
+Stopped, you pay only for the 30 GB volume and the idle Elastic IP — a couple of dollars a
+month. Running, a t3.medium in ap-south-1 is roughly $30/month on demand, so an event week
+costs about $7. Check current pricing and whatever free-tier credit the account has rather
+than taking those numbers as exact.
+
+The Elastic IP survives a stop/start, so the DNS record and every printed QR code keep
+working.
+
+### Updating a deployed instance
+
+```bash
+ssh -i ~/.ssh/chevella-stall.pem ubuntu@<ip>
+cd /opt/chevella && sudo git pull && sudo docker compose up -d --build
+sudo docker compose exec -T api npm run migrate
+```
+
+---
+
 ## Backups
 
 Two things matter. The database is reproducible from a dump; **the card photos are not
