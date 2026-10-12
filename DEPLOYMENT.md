@@ -111,13 +111,29 @@ QR for it.
 Two scripts in `deploy/aws/`. `provision.sh` creates the infrastructure from your laptop;
 `bootstrap.sh` runs on the instance itself as user-data and needs no interaction.
 
+The simplest route is **AWS CloudShell**, from the console of the account you actually
+want to bill. It is already authenticated as that account, so there are no access keys to
+create, store or rotate:
+
 ```bash
-aws configure                      # once, with a key that can run EC2
+git clone https://github.com/Swaroop0506/chevella-stall-app.git
+cd chevella-stall-app
+EXPECT_ACCOUNT=<your 12-digit account id> \
 DOMAIN=stall.chevellafarms.com \
 ADMIN_EMAIL=you@chevellafarms.com \
 REGION=ap-south-1 \
-  deploy/aws/provision.sh
+  bash deploy/aws/provision.sh
 ```
+
+From a laptop instead, `aws configure --profile <name>` first and prefix the command with
+`AWS_PROFILE=<name>`.
+
+`EXPECT_ACCOUNT` is required, and the script exits before creating anything if the
+credentials in scope belong to a different account. A laptop usually carries credentials
+for several accounts and the default profile is not necessarily the one you mean; billing
+a client's infrastructure to the wrong account is tedious to unpick and embarrassing to
+explain. Being signed in to the console in a browser grants the CLI nothing — the two are
+unrelated, so check with `aws sts get-caller-identity` rather than assuming.
 
 It creates a security group (SSH from your IP only, 80 and 443 open), a key pair saved to
 `~/.ssh/chevella-stall.pem`, a t3.medium on Ubuntu 24.04 with a 30 GB encrypted volume,

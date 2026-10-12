@@ -37,9 +37,29 @@ aws_() { aws --region "$REGION" "$@"; }
 command -v aws >/dev/null || die "AWS CLI not installed"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || die "No AWS credentials. Run 'aws configure' first."
+CALLER="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"
+
+# Refuse to run against an account you did not name.
+#
+# A laptop usually carries credentials for several accounts, and whichever one happens to
+# be the default profile is not necessarily the one you mean. Billing a client's
+# infrastructure to the wrong account is tedious to unpick and embarrassing to explain, so
+# EXPECT_ACCOUNT is required and checked before anything is created.
+if [ -z "${EXPECT_ACCOUNT:-}" ]; then
+  die "Set EXPECT_ACCOUNT to the 12-digit account id you intend to deploy into.
+       These credentials are currently account $ACCOUNT ($CALLER).
+       Example: EXPECT_ACCOUNT=$ACCOUNT DOMAIN=... deploy/aws/provision.sh"
+fi
+if [ "$EXPECT_ACCOUNT" != "$ACCOUNT" ]; then
+  die "Wrong account. EXPECT_ACCOUNT=$EXPECT_ACCOUNT but these credentials are $ACCOUNT.
+       Caller: $CALLER
+       Nothing was created. Switch profile with AWS_PROFILE=<name>, or fix EXPECT_ACCOUNT."
+fi
 
 bold "Deploying $NAME"
-info "account $ACCOUNT, region $REGION, $INSTANCE_TYPE, ${VOLUME_GB}GB"
+info "account $ACCOUNT ✓ matches EXPECT_ACCOUNT"
+info "caller  $CALLER"
+info "region $REGION, $INSTANCE_TYPE, ${VOLUME_GB}GB"
 [ -n "$DOMAIN" ] && info "domain $DOMAIN" || info "no domain — HTTP only, /scan camera will not work"
 
 # Refuse to build a second one by accident.
