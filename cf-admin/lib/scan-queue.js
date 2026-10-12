@@ -462,9 +462,16 @@ export async function flush({ force = false } = {}) {
       if (item.status === 'done') continue;
       await patch(item.id, { status: 'uploading', lastAttemptAt: new Date().toISOString() });
       try {
+        // Whether THIS upload carried the back matters below: the two shots are only
+        // seconds apart, so the back is routinely attached while the front is still in
+        // flight. Clearing backBytes unconditionally on success would discard a back the
+        // server never received, and the card would silently end up front-only.
+        const sentBack = Boolean(item.backBytes);
+
         const res = await upload(item);
         const lead = res.lead || {};
-        await patch(item.id, {
+
+        const changes = {
           status: 'done',
           leadId: lead.id || null,
           needsReview: lead.needs_review ?? null,
@@ -479,12 +486,23 @@ export async function flush({ force = false } = {}) {
           },
           lastError: null,
           attempts: item.attempts + 1,
-          hasBack: Boolean(item.backBytes) || Boolean(item.hasBack),
-          backPending: false,
-          // Drop the image data once the server has it; browser quotas are tight.
+          // The front is on the server; its bytes are no longer needed.
           bytes: undefined,
-          backBytes: undefined,
-        });
+        };
+
+        if (sentBack) {
+          changes.hasBack = true;
+          changes.backPending = false;
+          changes.backBytes = undefined;
+        } else {
+          // Re-read rather than trusting the snapshot taken before the upload started.
+          const current = await getOne(item.id);
+          const lateBack = Boolean(current?.backBytes);
+          changes.hasBack = lateBack || Boolean(item.hasBack);
+          changes.backPending = lateBack;   // backBytes deliberately left in place
+        }
+
+        await patch(item.id, changes);
         uploaded++;
       } catch (err) {
         failed++;
