@@ -197,7 +197,19 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ------------------------------------------------------------------ tables */
 
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+/* No overflow here on purpose.
+ *
+ * `overflow-x: auto` makes the computed `overflow-y` auto as well, which turns this into
+ * a scroll container — and a sticky <th> then sticks to THIS box rather than the page.
+ * Since the box has no height limit it never scrolls vertically, so the header simply
+ * scrolls away. Horizontal scrolling is therefore only enabled on viewports narrow enough
+ * to actually need it, where a sticky header matters less anyway.
+ */
+.table-wrap { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+
+@media (max-width: 1279px) {
+  .table-wrap { overflow-x: auto; }
+}
 table { width: 100%; border-collapse: collapse; font-size: .88rem; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 th {
@@ -209,8 +221,9 @@ th {
   font-weight: 700;
   white-space: nowrap;
   position: sticky;
-  top: 0;
-  z-index: 1;
+  /* Cleared by the toolbar above it; the page sets this to the toolbar's real height. */
+  top: var(--sticky-top, 0px);
+  z-index: 2;
 }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: var(--leaf-soft); }
@@ -309,4 +322,52 @@ dialog::backdrop { background: rgba(7, 42, 32, .42); }
   .sidebar, .no-print { display: none !important; }
   .main { padding: 0; }
   body { background: #fff; }
+}
+
+
+/* ------------------------------------------------------------------ sticky toolbar */
+
+/* Search and filters stay put while the list scrolls. With a few hundred leads, having to
+   scroll back to the top to change a filter is the difference between the list being
+   usable and not. */
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  padding: 10px 0;
+  margin: 0 0 14px;
+}
+.toolbar .card { margin: 0; }
+
+/* The page background does not reach the edges of .main, so a plain background on the
+   sticky bar would let rows show through beside it. */
+.toolbar::before {
+  content: '';
+  position: absolute;
+  inset: 0 -32px;
+  background: var(--bg);
+  z-index: -1;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.pager .count { font-size: .85rem; color: var(--ink-soft); }
+.pager .count b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.pager .nav { display: flex; align-items: center; gap: 8px; }
+.pager .nav span { font-size: .82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pager select { width: auto; padding: 5px 8px; font-size: .82rem; }
+
+@media (max-width: 860px) {
+  .toolbar::before { inset: 0 -16px; }
 }

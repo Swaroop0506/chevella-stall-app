@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, humanise, istDateTime, prettyPhone, relative } from '../../../lib/api';
@@ -21,6 +21,8 @@ function LeadsInner() {
   const [note, setNote] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [page, setPage] = useState(0);
+  const [limit, setLimit] = useState(50);
+  const toolbarRef = useRef(null);
 
   const filters = {
     event_id: params.get('event_id') || '',
@@ -31,7 +33,22 @@ function LeadsInner() {
   };
   const [q, setQ] = useState(filters.q);
 
-  const limit = 50;
+  /**
+   * The column header sticks directly beneath the filter bar, so it needs to know how
+   * tall that bar is. The bar wraps onto a second row on narrow screens, so the height is
+   * measured rather than hard-coded.
+   */
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return undefined;
+    const apply = () => {
+      document.documentElement.style.setProperty('--sticky-top', `${el.offsetHeight}px`);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => { ro.disconnect(); document.documentElement.style.removeProperty('--sticky-top'); };
+  }, []);
 
   const query = useCallback((extra = {}) => {
     const sp = new URLSearchParams();
@@ -44,7 +61,7 @@ function LeadsInner() {
     sp.set('limit', String(limit));
     sp.set('offset', String(page * limit));
     api.get(`/leads?${sp}`).then(setData).catch((e) => setError(humanise(e)));
-  }, [query, page]);
+  }, [query, page, limit]);
 
   useEffect(() => { api.get('/events').then((r) => setEvents(r.events)).catch(() => {}); }, []);
   useEffect(() => { load(); }, [load]);
@@ -90,6 +107,8 @@ function LeadsInner() {
   const leads = data?.leads || [];
   const total = data?.total ?? 0;
   const pages = Math.ceil(total / limit);
+  const from = total === 0 ? 0 : page * limit + 1;
+  const to = Math.min(total, page * limit + leads.length);
   const activeFilters = Object.values(filters).filter(Boolean).length;
 
   return (
@@ -115,7 +134,8 @@ function LeadsInner() {
       {error && <div className="banner banner-err">{error}</div>}
       {note && <div className="banner banner-ok">{note}</div>}
 
-      <div className="card card-tight" style={{ marginBottom: 16 }}>
+      <div className="toolbar" ref={toolbarRef}>
+        <div className="card card-tight">
         <div className="row" style={{ gap: 10 }}>
           <form onSubmit={submitSearch} style={{ flex: '1 1 240px', display: 'flex', gap: 6 }}>
             <input
@@ -148,6 +168,7 @@ function LeadsInner() {
               Clear filters
             </button>
           )}
+        </div>
         </div>
       </div>
 
@@ -244,17 +265,33 @@ function LeadsInner() {
             </table>
           </div>
 
-          {pages > 1 && (
-            <div className="row" style={{ justifyContent: 'center', marginTop: 16 }}>
-              <button type="button" className="btn-ghost btn-sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
-                ← Previous
-              </button>
-              <span className="hint">Page {page + 1} of {pages}</span>
-              <button type="button" className="btn-ghost btn-sm" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>
-                Next →
-              </button>
+          <div className="pager">
+            <div className="count">
+              Showing <b>{from}</b>–<b>{to}</b> of <b>{total}</b>
+              {activeFilters > 0 && ' matching leads'}
             </div>
-          )}
+
+            <div className="nav">
+              <label htmlFor="per-page" style={{ margin: 0, fontWeight: 500 }}>Per page</label>
+              <select
+                id="per-page"
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setPage(0); }}
+              >
+                {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+
+              <button type="button" className="btn-ghost btn-sm"
+                      disabled={page === 0} onClick={() => setPage(0)}>« First</button>
+              <button type="button" className="btn-ghost btn-sm"
+                      disabled={page === 0} onClick={() => setPage((p) => p - 1)}>← Prev</button>
+              <span>Page {page + 1} of {pages || 1}</span>
+              <button type="button" className="btn-ghost btn-sm"
+                      disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>Next →</button>
+              <button type="button" className="btn-ghost btn-sm"
+                      disabled={page + 1 >= pages} onClick={() => setPage(pages - 1)}>Last »</button>
+            </div>
+          </div>
         </>
       )}
     </>
