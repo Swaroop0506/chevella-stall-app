@@ -162,6 +162,21 @@ SECTION_HEADINGS = {
     "branches", "our branches", "godown", "warehouse",
 }
 
+# A person's name does not contain the vocabulary of what a business sells. These veto a
+# person-name candidate outright — safe, because rejecting them only pushes the line
+# towards being read as a company or as marketing copy, never towards being a phone or an
+# address.
+BUSINESS_WORDS = {
+    "care", "cares", "surgery", "surgical", "medical", "devices", "disposables",
+    "dressings", "bandages", "manufacturers", "manufacturer", "authorised", "authorized",
+    "distributors", "distributor", "suppliers", "supplier", "dealers", "products",
+    "solutions", "services", "systems", "technologies", "equipments", "equipment",
+    "instruments", "machinery", "quality", "positioning", "prolonged", "pralonged",
+    "exceptional", "every", "step", "welcome", "specialists", "consultancy", "consultants",
+    "engineering", "enterprises", "industries", "healthcare", "pharma", "diagnostics",
+    "water", "process", "treatment", "plant", "plants",
+}
+
 NAME_NOISE = {
     "gst", "gstin", "pan", "tin", "cin", "fssai", "iso", "msme", "udyam", "email", "mail",
     "phone", "mobile", "mob", "cell", "tel", "telephone", "fax", "web", "website", "www",
@@ -294,12 +309,28 @@ def is_indian_mobile(e164: str | None) -> bool:
 # --------------------------------------------------------------------------- extractors
 
 
+# OCR frequently loses the dot in a short TLD, turning "name@gmwater.in" into
+# "name@gmwaterin". The address then matches no email pattern at all and the field is
+# silently dropped, so the domain is repaired before matching rather than after.
+RE_DOTLESS_EMAIL = re.compile(
+    r"([A-Za-z0-9._%+\-]+)@([A-Za-z0-9\-]{2,})(com|in|net|org|co|io|biz)\b(?!\.)", re.I)
+
+
+def repair_dotless_domains(text: str) -> str:
+    def fix(m):
+        local, host, tld = m.group(1), m.group(2), m.group(3)
+        if "." in host:          # already well-formed, leave it alone
+            return m.group(0)
+        return f"{local}@{host}.{tld}"
+    return RE_DOTLESS_EMAIL.sub(fix, text)
+
+
 def extract_emails(lines: list[Line]) -> list[str]:
     found: list[str] = []
     for ln in lines:
-        candidate = ln.text
+        candidate = repair_dotless_domains(ln.text)
         # OCR sometimes drops the space around '@'; also try a de-spaced copy.
-        for probe in (candidate, re.sub(r"\s*@\s*", "@", candidate)):
+        for probe in (candidate, repair_dotless_domains(re.sub(r"\s*@\s*", "@", ln.text))):
             for m in RE_EMAIL.finditer(probe):
                 e = fix_email_ocr(m.group(0))
                 if "@" in e and "." in e.split("@", 1)[1] and e not in found:
@@ -447,7 +478,14 @@ def looks_like_person_name(text: str) -> float:
         return 0.0
 
     low = t.lower()
+    bare = low.strip(" .,").replace(".", "")
+    # A state or city is never the person. "Maharashtra." on its own line otherwise reads
+    # as a perfectly good Title-Case single-word name and outscores the real one.
+    if bare in INDIAN_STATES or bare in KNOWN_CITIES:
+        return 0.0
     if any(w.strip(".,") in NAME_NOISE for w in low.split()):
+        return 0.0
+    if any(w.strip(".,") in BUSINESS_WORDS for w in low.split()):
         return 0.0
     if any(marker in low for marker in COMPANY_MARKERS):
         return 0.0
@@ -463,7 +501,9 @@ def looks_like_person_name(text: str) -> float:
     if all(re.match(r"^[A-Z][a-z'\-]+$", w) for w in core):
         score += 0.35
     elif all(w.isupper() for w in core) and len(core) <= 3:
-        score += 0.18   # ALL-CAPS names are common on Indian cards
+        # Printing the name in capitals is the norm on Indian business cards, not the
+        # exception, so this is weighted on a par with Title Case rather than below it.
+        score += 0.32
     elif sum(1 for w in core if w[:1].isupper()) >= len(core) - 1:
         score += 0.12
 
@@ -480,14 +520,23 @@ def looks_like_person_name(text: str) -> float:
     return max(0.0, min(1.0, score))
 
 
+# Two-letter titles are also ordinary words and initials. "GM" means General Manager on a
+# line like "GM - Sales", but it is the company's initials in "GM Water & Process" — which
+# otherwise scores as a job title and gets excluded from the company name.
+AMBIGUOUS_TITLES = {"gm", "md", "hr", "bd", "vp", "ca", "er", "sr", "jr", "rep", "ops"}
+
+
 def designation_score(text: str) -> float:
     cleaned = normalise_text(text).lower().strip(" :-")
     if cleaned in SECTION_HEADINGS:
         return 0.0
-    words = [w.strip(".,&-") for w in cleaned.replace("/", " ").split()]
+    words = [w for w in (w.strip(".,&-") for w in cleaned.replace("/", " ").split()) if w]
     if not words:
         return 0.0
-    hits = sum(1 for w in words if w in DESIGNATION_WORDS)
+    hits = sum(
+        1 for w in words
+        if w in DESIGNATION_WORDS and not (w in AMBIGUOUS_TITLES and len(words) > 2)
+    )
     if hits == 0:
         return 0.0
     ratio = hits / len(words)
@@ -648,9 +697,9 @@ def parse_card(blocks: list[dict]) -> ParseResult:
         notes.append("whatsapp_assumed_from_mobile")
 
     # --- company -----------------------------------------------------------
-    company_ln, company_conf, company_note = _pick_company(lines, emails, urls)
-    if company_ln is not None:
-        fields["company"] = _tidy_company(company_ln.text)
+    company_text, company_conf, company_note, company_lines = _pick_company(lines, emails, urls)
+    if company_text:
+        fields["company"] = _tidy_company(company_text)
         conf["company"] = round(company_conf, 3)
         if company_note:
             notes.append(company_note)
@@ -672,7 +721,7 @@ def parse_card(blocks: list[dict]) -> ParseResult:
             conf["designation"] = round(min(0.93, s * ln.score), 3)
 
     # --- name --------------------------------------------------------------
-    name_ln, name_conf = _pick_name(lines, fields, emails)
+    name_ln, name_conf = _pick_name(lines, fields, emails, exclude=company_lines)
     if name_ln:
         fields["full_name"] = _tidy_name(name_ln.text)
         conf["full_name"] = round(name_conf, 3)
@@ -688,13 +737,29 @@ def parse_card(blocks: list[dict]) -> ParseResult:
     if addr_lines:
         addr_lines.sort(key=lambda ln: ln.index)
         joined = ", ".join(normalise_text(ln.text).strip(" ,") for ln in addr_lines)
-        joined = re.sub(r",\s*,", ", ", joined)
+        # A pincode and a GSTIN are routinely printed on the same line. The pincode is part
+        # of the address; the registration number is a separate field and reads as noise
+        # when it is pasted into a mailing address.
+        joined = re.sub(r"\b(GST(IN)?|PAN|CIN|FSSAI|TIN|Lic\.?\s*No)\b\s*[:.\-]?\s*[A-Z0-9]*",
+                        "", joined, flags=re.I)
+        joined = re.sub(r"\s*,\s*,", ", ", joined)
+        joined = re.sub(r"\s{2,}", " ", joined).strip(" ,.;")
         fields["address"] = joined
         conf["address"] = round(min(0.9, 0.55 + 0.1 * len(addr_lines)), 3)
         fields.update(split_address(joined))
         for k in ("city", "state", "pincode"):
             if k in fields:
                 conf[k] = 0.85 if k == "pincode" else 0.75
+
+    # A state often sits on a line of its own ("Maharashtra."), which scores too low to be
+    # pulled into the address block but is still the only place the state is written.
+    if not fields.get("state"):
+        for ln in lines:
+            bare = ln.lower.strip(" .,")
+            if bare in INDIAN_STATES:
+                fields["state"] = INDIAN_STATES[bare]
+                conf["state"] = 0.8
+                break
 
     # --- review decision ---------------------------------------------------
     # The bar: a lead is only useful if you can reach the person. No phone and no email
@@ -850,7 +915,7 @@ def _pick_company(lines, emails, urls):
       * word count and descriptor density, because taglines are long and generic.
     """
     if not lines:
-        return None, 0.0, None
+        return None, 0.0, None, []
 
     base = _domain_base(emails, urls)
     heights = [ln.h for ln in lines if ln.h > 0]
@@ -900,13 +965,64 @@ def _pick_company(lines, emails, urls):
             best = (total, ln, domain_match)
 
     if not best or best[0] < 0.3:
-        return None, 0.0, None
+        return None, 0.0, None, []
 
     total, ln, domain_match = best
     note = "company_confirmed_by_domain" if domain_match >= 0.7 else None
     # The domain agreeing is worth far more than the heuristics; say so in the confidence.
     confidence = min(0.97, 0.9 if domain_match >= 1.0 else min(0.88, 0.45 + total))
-    return ln, confidence, note
+    text, used = _extend_company(ln, lines)
+    return text, confidence, note, used
+
+
+def _extend_company(anchor: Line, lines: list[Line], limit: int = 3):
+    """Rejoins a company name set over several stacked lines.
+
+    A logo block routinely breaks the name across two or three lines — "GM Water & Process"
+    above "Technologies Pvt. Ltd." Taking only the line carrying the legal suffix yields
+    "Technologies Pvt Ltd", which is not the company's name and is useless in a follow-up.
+
+    Only lines directly above or below, at the same left edge, with no digits or "@", and
+    which do not look like an address or a job title, are absorbed.
+    """
+    used = [anchor]
+
+    def stacked(a, b):
+        if abs(a.x - b.x) > 0.6 * max(a.h, b.h):
+            return False
+        # A company name is set at one size across its lines; the tagline under it is
+        # smaller. Requiring similar heights keeps "Jeeva Healthcare" from swallowing
+        # "Surgical & Medical distributors".
+        if min(a.h, b.h) < 0.7 * max(a.h, b.h):
+            return False
+        gap = (b.y - (a.y + a.h)) if b.y > a.y else (a.y - (b.y + b.h))
+        return -2 <= gap <= 0.8 * max(a.h, b.h)
+
+    def usable(ln):
+        if "@" in ln.text or any(ch.isdigit() for ch in ln.text):
+            return False
+        # The person's name is very often set directly under the company; absorbing it
+        # would lose the name and corrupt the company in one go. Only a multi-word
+        # candidate is protected though — a lone word stacked above a legal suffix, at the
+        # same size, is the first half of the company ("ROYAL" over "SURGICARE PVT. LTD."),
+        # and single-word personal names are vanishingly rare on a business card.
+        if looks_like_person_name(ln.text) >= 0.5 and len(ln.text.split()) >= 2:
+            return False
+        return address_score(ln.text) < 0.35 and designation_score(ln.text) < 0.45
+
+    changed = True
+    while changed and len(used) < limit:
+        changed = False
+        for ln in lines:
+            if ln in used or not usable(ln):
+                continue
+            if any(stacked(ln, u) or stacked(u, ln) for u in used):
+                used.append(ln)
+                changed = True
+                break
+
+    used.sort(key=lambda l: l.y)
+    return " ".join(u.text for u in used), used
 
 
 def _largest_top_line(lines: list[Line]) -> Line | None:
@@ -924,7 +1040,8 @@ def _largest_top_line(lines: list[Line]) -> Line | None:
     return max(upper, key=lambda ln: (ln.h, len(ln.text)))
 
 
-def _pick_name(lines: list[Line], fields: dict, emails: list[str]) -> tuple[Line | None, float]:
+def _pick_name(lines: list[Line], fields: dict, emails: list[str],
+               exclude: list[Line] = ()) -> tuple[Line | None, float]:
     """Combines the name-shape score with font size, position and the email's local part."""
     email_hint = name_from_email(emails[0]) if emails else None
     hint_tokens = {t.lower() for t in (email_hint or "").split()}
@@ -935,8 +1052,18 @@ def _pick_name(lines: list[Line], fields: dict, emails: list[str]) -> tuple[Line
 
     best: tuple[float, Line] | None = None
     for ln in lines:
+        if ln in exclude:
+            continue
         shape = looks_like_person_name(ln.text)
         if shape < 0.4:
+            continue
+        # A lone word is only a person when something else agrees it is — the email's
+        # local part, usually. Otherwise it is a brand or a product name picked off a
+        # distributor's card, and inventing a name is worse than leaving the field empty
+        # for a human to fill from the photo.
+        if len(ln.text.split()) < 2 and not (
+            hint_tokens and hint_tokens & {t.lower() for t in ln.text.split()}
+        ):
             continue
         if company and normalise_text(ln.text).lower() == company:
             continue
