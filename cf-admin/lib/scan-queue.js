@@ -5,9 +5,9 @@
  *
  * Same contract as the Android app's queue (cf-mobile/src/lib/queue.js) — capture now,
  * upload later, idempotent on a client-generated id — but backed by IndexedDB because
- * that is the only browser store that holds a multi-megabyte Blob reliably. localStorage
- * would need base64, inflating every photo by a third and blowing the 5 MB quota after
- * about four cards.
+ * that is the only browser store that holds multi-megabyte images. localStorage would
+ * need base64, inflating every photo by a third and blowing the 5 MB quota after about
+ * four cards. Images are kept as ArrayBuffers rather than Blobs; see blobOf() for why.
  *
  * The honest limitation versus the native app: a browser only runs while its tab is
  * alive. The queue drains on an interval, when the tab regains focus, and when the
@@ -62,20 +62,44 @@ export function isConfigured(s = getSettings()) {
 
 // ----------------------------------------------------------------- indexeddb
 
-function openDb() {
+function createStore(db) {
+  if (db.objectStoreNames.contains(STORE)) return;
+  const store = db.createObjectStore(STORE, { keyPath: 'id' });
+  store.createIndex('status', 'status');
+  store.createIndex('capturedAt', 'capturedAt');
+}
+
+function openAt(version) {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        const store = db.createObjectStore(STORE, { keyPath: 'id' });
-        store.createIndex('status', 'status');
-        store.createIndex('capturedAt', 'capturedAt');
-      }
-    };
+    const req = version ? indexedDB.open(DB_NAME, version) : indexedDB.open(DB_NAME);
+    req.onupgradeneeded = () => createStore(req.result);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('indexeddb_blocked'));
   });
+}
+
+/**
+ * Opens the database, repairing it if the object store is missing.
+ *
+ * A database can legitimately exist at the expected version without the store — another
+ * script opening `cf-scan` with no version creates an empty one, and from then on
+ * `onupgradeneeded` never fires again and every transaction throws NotFoundError. Bumping
+ * the version is the only way to get an upgrade transaction and create the store, so this
+ * detects that state and repairs it rather than failing forever.
+ */
+async function openDb() {
+  let db = await openAt(DB_VERSION);
+  if (db.objectStoreNames.contains(STORE)) return db;
+
+  const next = db.version + 1;
+  db.close();
+  db = await openAt(next);
+  if (!db.objectStoreNames.contains(STORE)) {
+    db.close();
+    throw new Error('indexeddb_store_missing');
+  }
+  return db;
 }
 
 async function withStore(mode, fn) {
@@ -159,6 +183,23 @@ async function emit() {
 
 // ----------------------------------------------------------------- capture
 
+/**
+ * Rebuilds a Blob from what was stored.
+ *
+ * Photos are persisted as ArrayBuffers rather than Blobs on purpose. Storing a Blob in
+ * IndexedDB is legal, and works on Chrome, but WebKit has a long history of failing on it
+ * — the write throws, or worse, succeeds and hands back a Blob that cannot be read later.
+ * An ArrayBuffer is a plain structured-clonable value that every engine handles the same
+ * way, and the Blob costs nothing to rebuild at upload time.
+ *
+ * Also accepts a Blob so queue entries written by an older build still upload.
+ */
+function blobOf(stored, mime) {
+  if (!stored) return null;
+  if (stored instanceof Blob) return stored;
+  return new Blob([stored], { type: mime || 'image/jpeg' });
+}
+
 function captureId() {
   const rand = (crypto.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, '');
   return `w${Date.now().toString(36)}-${rand.slice(0, 10)}`;
@@ -189,6 +230,10 @@ export async function prepareImage(source) {
   const blob = await new Promise((resolve) =>
     canvas.toBlob(resolve, 'image/jpeg', 0.82));
 
+  // Safari returns null rather than throwing when it cannot encode the canvas. Letting
+  // that through produces a far more confusing failure three calls later.
+  if (!blob) throw new Error('could not encode the photo on this device');
+
   return { blob, width: w, height: h };
 }
 
@@ -196,8 +241,10 @@ export async function enqueueCapture(blob, { notes = '', tags = [], backBlob = n
   const s = getSettings();
   const record = {
     id: captureId(),
-    blob,
-    backBlob,
+    bytes: await blob.arrayBuffer(),
+    mime: blob.type || 'image/jpeg',
+    backBytes: backBlob ? await backBlob.arrayBuffer() : null,
+    backMime: backBlob?.type || 'image/jpeg',
     eventId: s.eventId,
     eventName: s.eventName,
     capturedBy: s.staffName,
@@ -331,18 +378,25 @@ export async function attachBack(id, backBlob) {
         backFilled: res.filled || [],
       });
     } catch {
-      // Keep the blob and retry on the next flush.
-      return patch(id, { backBlob, hasBack: true, backPending: true });
+      // Keep the bytes and retry on the next flush.
+      return patch(id, {
+        backBytes: await backBlob.arrayBuffer(), backMime: backBlob.type || 'image/jpeg',
+        hasBack: true, backPending: true,
+      });
     }
   }
 
-  return patch(id, { backBlob, hasBack: true, backPending: false });
+  return patch(id, {
+    backBytes: await backBlob.arrayBuffer(), backMime: backBlob.type || 'image/jpeg',
+    hasBack: true, backPending: false,
+  });
 }
 
 async function upload(item) {
   const form = new FormData();
-  form.append('card', item.blob, `${item.id}.jpg`);
-  if (item.backBlob) form.append('card_back', item.backBlob, `${item.id}-back.jpg`);
+  form.append('card', blobOf(item.bytes, item.mime), `${item.id}.jpg`);
+  const back = blobOf(item.backBytes, item.backMime);
+  if (back) form.append('card_back', back, `${item.id}-back.jpg`);
   form.append('event_id', item.eventId);
   form.append('client_capture_id', item.id);
   if (item.capturedBy) form.append('captured_by', item.capturedBy);
@@ -425,11 +479,11 @@ export async function flush({ force = false } = {}) {
           },
           lastError: null,
           attempts: item.attempts + 1,
-          hasBack: Boolean(item.backBlob) || Boolean(item.hasBack),
+          hasBack: Boolean(item.backBytes) || Boolean(item.hasBack),
           backPending: false,
-          // Drop the Blobs once the server has them; browser storage quotas are tight.
-          blob: undefined,
-          backBlob: undefined,
+          // Drop the image data once the server has it; browser quotas are tight.
+          bytes: undefined,
+          backBytes: undefined,
         });
         uploaded++;
       } catch (err) {
@@ -446,10 +500,10 @@ export async function flush({ force = false } = {}) {
 
     // Backs photographed after their front had already gone up, whose own upload failed.
     for (const item of await listQueue()) {
-      if (item.status !== 'done' || !item.backPending || !item.backBlob || !item.leadId) continue;
+      if (item.status !== 'done' || !item.backPending || !item.backBytes || !item.leadId) continue;
       try {
-        await uploadBack(item.leadId, item.backBlob, item.id);
-        await patch(item.id, { backPending: false, backBlob: undefined });
+        await uploadBack(item.leadId, blobOf(item.backBytes, item.backMime), item.id);
+        await patch(item.id, { backPending: false, backBytes: undefined });
         uploaded++;
       } catch {
         failed++;

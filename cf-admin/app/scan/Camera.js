@@ -136,9 +136,20 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
   async function keep(mode) {
     if (!shot) return;
     setBusy(true);
+    setError(null);
     try {
       await onCaptured(shot.blob, { mode });
       discard();
+    } catch (err) {
+      // Without this the button silently does nothing, which reads as "the app is
+      // broken" rather than "saving failed" — the worst possible failure at a stall,
+      // because staff keep shooting cards that are never stored.
+      const why = err?.message || String(err);
+      setError(
+        why.includes('indexeddb') || err?.name === 'InvalidStateError'
+          ? 'Could not save on this phone. If you are in Private Browsing, switch to a normal tab.'
+          : `Could not save: ${why}. The photo is still on screen — try Keep again.`,
+      );
     } finally {
       setBusy(false);
     }

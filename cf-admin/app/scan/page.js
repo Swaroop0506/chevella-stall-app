@@ -193,9 +193,9 @@ export default function ScanPage() {
         setToast('Card saved.');
         setTimeout(() => setToast(null), 2200);
       }
-    } catch {
-      setToast('Could not read that image.');
-      setTimeout(() => setToast(null), 3000);
+    } catch (err) {
+      setToast(`Could not save: ${err?.message || err}`);
+      setTimeout(() => setToast(null), 6000);
     } finally {
       pendingAnnotate.current = false;
     }
