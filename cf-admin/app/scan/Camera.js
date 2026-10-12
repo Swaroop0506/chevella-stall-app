@@ -30,6 +30,8 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
   const [busy, setBusy] = useState(false);
   const [shot, setShot] = useState(null);     // {blob, url}
   const [error, setError] = useState(null);
+  const [facing, setFacing] = useState('environment');
+  const [canFlip, setCanFlip] = useState(false);
 
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -45,17 +47,36 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
         onCameraFailed?.('no_api');
         return;
       }
+      // Ask for plenty of resolution; the browser clamps to what the sensor can do.
+      const size = { width: { ideal: 2560 }, height: { ideal: 1440 } };
+
+      /**
+       * `exact`, not `ideal`.
+       *
+       * `ideal` is only a preference, and iOS Safari routinely ignores it and hands back
+       * the selfie camera — which produces a fixed-focus photo of the person holding the
+       * card, at arm's length, with the card too small and blurred to read. The capture
+       * then succeeds and the lead arrives empty, which looks like the app is broken
+       * rather than like the wrong lens was used.
+       *
+       * `exact` fails loudly instead, and a device with only one camera (a laptop) falls
+       * back to whatever it has.
+       */
+      async function open(mode) {
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { exact: mode }, ...size }, audio: false,
+          });
+        } catch (err) {
+          if (err.name !== 'OverconstrainedError' && err.name !== 'NotFoundError') throw err;
+          return navigator.mediaDevices.getUserMedia({
+            video: { facingMode: mode, ...size }, audio: false,
+          });
+        }
+      }
+
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            // Ask for plenty; the browser clamps to what the sensor can do.
-            width: { ideal: 2560 },
-            height: { ideal: 1440 },
-            focusMode: { ideal: 'continuous' },
-          },
-          audio: false,
-        });
+        const stream = await open(facing);
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -67,6 +88,11 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
           await videoRef.current.play().catch(() => {});
         }
         setReady(true);
+
+        // Only offer the flip control when there really is more than one camera.
+        navigator.mediaDevices.enumerateDevices?.()
+          .then((ds) => setCanFlip(ds.filter((d) => d.kind === 'videoinput').length > 1))
+          .catch(() => {});
       } catch (err) {
         // NotAllowedError means the person said no; NotFoundError means no camera.
         // Either way the OS-camera fallback is the useful answer, not an error page.
@@ -75,7 +101,7 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
     })();
 
     return () => { cancelled = true; stop(); };
-  }, [onCameraFailed, stop]);
+  }, [facing, onCameraFailed, stop]);
 
   // Release the camera when the tab is hidden — otherwise the indicator stays lit and
   // some phones keep the sensor powered, which matters when a stall phone is at 20%.
@@ -165,6 +191,7 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
           <div className="box"><i /><i /><i /><i /></div>
           <p>
             {!ready ? 'Starting camera…'
+              : facing === 'user' ? 'Front camera — tap Flip for the back camera'
               : side === 'back' ? 'Now the BACK of the card'
               : 'Fill this box with the card'}
           </p>
@@ -183,7 +210,16 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
           >
             <i />
           </button>
-          <span className="side" />
+          {canFlip ? (
+            <button
+              type="button"
+              className="side"
+              style={{ textAlign: 'right' }}
+              onClick={() => { setReady(false); setFacing((f) => (f === 'environment' ? 'user' : 'environment')); }}
+            >
+              Flip
+            </button>
+          ) : <span className="side" />}
         </div>
       ) : (
         <div className="sc-confirm">
