@@ -58,11 +58,28 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for putting this on a server with HTTPS.
 ### Local development without Docker
 
 ```bash
-# Postgres on :5432, then:
-cd cf-api   && npm install && npm run migrate && npm run dev     # :4000
-cd cf-admin && npm install && npm run dev                        # :3000
-cd cf-ocr   && pip install -r requirements.txt && uvicorn src.main:app --port 8000
+scripts/dev.sh up
 ```
+
+That is the whole thing. It creates a Postgres cluster, builds the OCR virtualenv,
+installs npm dependencies, writes a dev `.env`, runs the migrations and starts all four
+services — and it is idempotent, so re-running it just starts whatever is down.
+
+```bash
+scripts/dev.sh status    # health-check each service
+scripts/dev.sh logs      # tail everything
+scripts/dev.sh down      # stop
+scripts/dev.sh reset     # drop the dev database and start fresh
+```
+
+Everything it creates lives in `.devdata/` (gitignored). Deliberately **not** in `/tmp`:
+macOS reaps `/tmp` after a few days and will silently corrupt a Postgres cluster left
+there. Ports are overridable — `ADMIN_PORT=3100 scripts/dev.sh up` if something already
+holds 3000.
+
+The OCR service needs **Python 3.11–3.13**; onnxruntime has no wheels for 3.14 yet, and
+the script picks a working interpreter rather than whatever `python3` points at. The first
+run downloads the PP-OCRv5 weights, so give it a few minutes.
 
 `cf-admin` proxies `/api/v1/*` to `cf-api`, so the browser only ever talks to one origin
 and the session cookie stays same-origin. Point it with `API_INTERNAL_URL` in

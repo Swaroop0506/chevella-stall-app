@@ -27,6 +27,9 @@ cf-mobile/ios/
 cf-api/storage/**
 !cf-api/storage/**/.gitkeep
 
+# local dev state created by scripts/dev.sh — database cluster, venv, logs
+.devdata/
+
 # tooling
 .DS_Store
 *.log
