@@ -267,3 +267,86 @@
      dimmed screen is unreadable. */
   .sc { background: var(--cream); }
 }
+
+
+/* ---------------------------------------------------------------- two-step capture */
+
+/* Which side is being shot, stated at the top of the viewfinder rather than inferred
+   from a button label further down. At a stall the phone is glanced at, not read. */
+.sc-step {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  padding: calc(14px + env(safe-area-inset-top)) 16px 14px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, .72), rgba(0, 0, 0, 0));
+  text-align: center;
+  z-index: 3;
+  pointer-events: none;
+}
+.sc-step b {
+  display: block;
+  color: #fff;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.sc-step span { display: block; color: #cfe3d7; font-size: .8rem; margin-top: 3px; }
+
+.sc-pips { display: flex; gap: 7px; justify-content: center; margin-top: 10px; }
+.sc-pips i {
+  width: 34px; height: 4px; border-radius: 2px;
+  background: rgba(255, 255, 255, .3);
+}
+.sc-pips i[data-on='true'] { background: var(--leaf); }
+.sc-pips i[data-done='true'] { background: #fff; }
+
+/* The "you may move on" signal. Deliberately full-screen and green: staff need to know
+   the card is finished without reading anything. */
+.sc-done {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: linear-gradient(180deg, #16623f, #0b3d2e);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  animation: sc-pop .18s ease-out;
+}
+@keyframes sc-pop { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+
+.sc-done .tick {
+  width: 96px; height: 96px; border-radius: 50%;
+  background: #fff; color: #16623f;
+  display: grid; place-items: center;
+  font-size: 3rem; font-weight: 700; line-height: 1;
+  margin-bottom: 18px;
+}
+.sc-done h2 { color: #fff; font-size: 1.5rem; margin: 0 0 6px; }
+.sc-done p { color: #bfe3cf; font-size: .95rem; margin: 0 0 4px; }
+.sc-done .count {
+  color: #fff; font-size: .82rem; font-weight: 700;
+  background: rgba(255, 255, 255, .16);
+  padding: 5px 14px; border-radius: 999px; margin-top: 14px;
+}
+.sc-done .acts { width: 100%; max-width: 360px; margin-top: 28px; }
+.sc-done .acts button { width: 100%; justify-content: center; }
+.sc-done .acts .next {
+  background: #fff; color: var(--green-800);
+  border: none; padding: 17px; font-size: 1.05rem; font-weight: 800;
+  border-radius: 14px;
+}
+.sc-done .acts .minor {
+  background: transparent; border: none; color: #bfe3cf;
+  padding: 14px; font-size: .92rem; font-weight: 600;
+}
+
+/* A back that is genuinely blank still has to be dealt with, but quietly — it should
+   never look like the easy way past step 2. */
+.sc-skip {
+  background: none; border: none;
+  color: rgba(255, 255, 255, .62);
+  font-size: .82rem; text-decoration: underline;
+  padding: 12px; width: 100%;
+}

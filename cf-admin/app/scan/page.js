@@ -30,8 +30,12 @@ export default function ScanPage() {
   const [online, setOnline] = useState(true);
   const [camera, setCamera] = useState(false);
   const [reviewId, setReviewId] = useState(null);
-  // Capture id whose BACK we are about to photograph, or null for a normal front shot.
+  // Which side the camera is on, and the capture it belongs to. Every card goes through
+  // front then back, so these advance together.
+  const [step, setStep] = useState('front');
   const [backFor, setBackFor] = useState(null);
+  // Set once both sides are in, to show the "card is finished" screen.
+  const [doneCard, setDoneCard] = useState(null);
   const [toast, setToast] = useState(null);
   const fileRef = useRef(null);
   const pendingAnnotate = useRef(false);
@@ -138,36 +142,48 @@ export default function ScanPage() {
    * mode 'back'     — queue it, then immediately reopen the camera for the reverse
    * mode 'annotate' — queue it and jump to tags/notes
    */
-  const onCaptured = useCallback(async (blob, { mode = 'next' } = {}) => {
-    // Capturing the reverse of a card captured a moment ago.
-    if (backFor) {
+  /**
+   * Both sides of every card, in order.
+   *
+   * The front is queued the moment it is taken rather than held in memory until the back
+   * arrives — if the phone dies or the tab is closed between the two shots, a front-only
+   * lead is still a lead, whereas a lost one is gone.
+   */
+  const onCaptured = useCallback(async (blob) => {
+    if (step === 'back' && backFor) {
       await attachBack(backFor, blob);
+      setDoneCard({ id: backFor, bothSides: true });
       setBackFor(null);
-      setCamera(false);
-      setToast('Back saved.');
-      setTimeout(() => setToast(null), 2000);
+      setStep('front');
       return null;
     }
 
     const entry = await enqueueCapture(blob);
-
-    if (mode === 'back') {
-      setBackFor(entry.id);
-      return entry;                 // camera stays open, now in back mode
-    }
-    if (mode === 'annotate') {
-      setCamera(false);
-      setReviewId(entry.id);
-      setView('review');
-    }
+    setBackFor(entry.id);
+    setStep('back');
     return entry;
+  }, [step, backFor]);
+
+  /** The back really is blank on some cards; finishing is better than a wasted photo. */
+  const skipBack = useCallback(() => {
+    setDoneCard({ id: backFor, bothSides: false });
+    setBackFor(null);
+    setStep('front');
   }, [backFor]);
 
-  /** "Add back" from the Cards list, for a card already captured. */
+  /** "Add back" from the Cards list, for a card captured earlier. */
   const shootBackFor = useCallback((id) => {
     setBackFor(id);
+    setStep('back');
     setCamera(true);
   }, []);
+
+  function closeCamera() {
+    setCamera(false);
+    setStep('front');
+    setBackFor(null);
+    setDoneCard(null);
+  }
 
   async function onFilePicked(e) {
     const file = e.target.files?.[0];
@@ -176,23 +192,21 @@ export default function ScanPage() {
     try {
       const { blob } = await prepareImage(file);
 
-      // The OS camera can also be used for the back, when live capture is unavailable.
+      // The OS camera path runs the same two steps, so a phone that cannot open the
+      // live viewfinder still ends up with both sides.
       if (backFor) {
         await attachBack(backFor, blob);
         setBackFor(null);
-        setToast('Back saved.');
-        setTimeout(() => setToast(null), 2000);
+        setToast('Both sides saved — ready for the next card.');
+        setTimeout(() => setToast(null), 3000);
         return;
       }
 
       const entry = await enqueueCapture(blob);
-      if (pendingAnnotate.current) {
-        setReviewId(entry.id);
-        setView('review');
-      } else {
-        setToast('Card saved.');
-        setTimeout(() => setToast(null), 2200);
-      }
+      setBackFor(entry.id);
+      setToast('Front saved. Now photograph the BACK of the same card.');
+      setTimeout(() => setToast(null), 5000);
+      setTimeout(() => fileRef.current?.click(), 500);
     } catch (err) {
       setToast(`Could not save: ${err?.message || err}`);
       setTimeout(() => setToast(null), 6000);
@@ -269,7 +283,7 @@ export default function ScanPage() {
             </div>
 
             <button type="button" className="sc-shoot" onClick={() => setCamera(true)}>
-              📷 Scan a visiting card
+              📷 Scan a card
             </button>
 
             <button
@@ -290,6 +304,11 @@ export default function ScanPage() {
               {stats.pending ? `Sync now (${stats.pending} waiting)` : 'Sync now'}
             </button>
 
+            <p className="sc-note">
+              Every card is two shots: <b>front, then back</b>. The screen tells you which
+              side it wants and confirms when the card is finished, so you know you can
+              hand it back and move on.
+            </p>
             <p className="sc-note">
               Lay the card flat, fill the guide box, let it focus. Saving is instant — the
               upload and the text reading happen in the background.
@@ -320,13 +339,51 @@ export default function ScanPage() {
         )}
       </div>
 
-      {camera && (
+      {camera && doneCard && (
+        <div className="sc-done">
+          <div className="tick" aria-hidden="true">✓</div>
+          <h2>Card saved</h2>
+          <p>
+            {doneCard.bothSides
+              ? 'Both sides captured.'
+              : 'Front captured, back marked blank.'}
+          </p>
+          <p>You can hand the card back and take the next one.</p>
+          <div className="count">{stats.today} scanned today</div>
+
+          <div className="acts">
+            <button type="button" className="next" onClick={() => setDoneCard(null)}>
+              Scan the next card
+            </button>
+            <button
+              type="button"
+              className="minor"
+              onClick={() => {
+                const id = doneCard.id;
+                setDoneCard(null);
+                closeCamera();
+                setReviewId(id);
+                setView('review');
+              }}
+            >
+              Add a note or interest to this one
+            </button>
+            <button type="button" className="minor" onClick={closeCamera}>
+              Stop scanning
+            </button>
+          </div>
+        </div>
+      )}
+
+      {camera && !doneCard && (
         <Camera
-          side={backFor ? 'back' : 'front'}
+          step={step}
+          cardNo={stats.today + 1}
+          onSkipBack={step === 'back' ? skipBack : undefined}
           onCaptured={onCaptured}
-          onClose={() => { setCamera(false); setBackFor(null); }}
+          onClose={closeCamera}
           onCameraFailed={(why) => {
-            setCamera(false);
+            closeCamera();
             setToast(
               why === 'NotAllowedError'
                 ? 'Camera blocked. Allow it in the address bar, or use your phone camera app.'

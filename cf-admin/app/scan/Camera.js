@@ -18,10 +18,13 @@ import { prepareImage } from '../../lib/scan-queue';
  */
 /**
  * @param {object} props
- * @param {'front'|'back'} props.side  'back' puts it in single-shot mode: shoot the reverse
- *        of a card already captured, hand the blob back, and close.
+ * @param {'front'|'back'} props.step   which side is being shot; drives every label
+ * @param {number} props.cardNo         1-based number of the card in today's run
+ * @param {Function} [props.onSkipBack] called when the back is genuinely blank
  */
-export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'front' }) {
+export default function Camera({
+  onCaptured, onClose, onCameraFailed, onSkipBack, step = 'front', cardNo = 1,
+}) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const trackRef = useRef(null);
@@ -102,6 +105,8 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
 
     return () => { cancelled = true; stop(); };
   }, [facing, onCameraFailed, stop]);
+
+  const isBack = step === 'back';
 
   // Release the camera when the tab is hidden — otherwise the indicator stays lit and
   // some phones keep the sensor powered, which matters when a stall phone is at 20%.
@@ -187,15 +192,27 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
       {shot && <img className="shot" src={shot.url} alt="The card you just photographed" />}
 
       {!shot && (
-        <div className="sc-guide">
-          <div className="box"><i /><i /><i /><i /></div>
-          <p>
-            {!ready ? 'Starting camera…'
-              : facing === 'user' ? 'Front camera — tap Flip for the back camera'
-              : side === 'back' ? 'Now the BACK of the card'
-              : 'Fill this box with the card'}
-          </p>
-        </div>
+        <>
+          <div className="sc-step">
+            <b>{isBack ? 'BACK OF CARD' : 'FRONT OF CARD'}</b>
+            <span>
+              {isBack ? 'Step 2 of 2 — the side with the address' : `Step 1 of 2 · card ${cardNo}`}
+            </span>
+            <div className="sc-pips">
+              <i data-done={isBack} data-on={!isBack} />
+              <i data-on={isBack} />
+            </div>
+          </div>
+
+          <div className="sc-guide">
+            <div className="box"><i /><i /><i /><i /></div>
+            <p>
+              {!ready ? 'Starting camera…'
+                : facing === 'user' ? 'Front camera — tap Flip for the back camera'
+                : 'Fill this box with the card'}
+            </p>
+          </div>
+        </>
       )}
 
       {!shot ? (
@@ -210,7 +227,12 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
           >
             <i />
           </button>
-          {canFlip ? (
+          {isBack && onSkipBack ? (
+            <button type="button" className="side" style={{ textAlign: 'right' }}
+                    onClick={onSkipBack}>
+              Blank
+            </button>
+          ) : canFlip ? (
             <button
               type="button"
               className="side"
@@ -224,29 +246,16 @@ export default function Camera({ onCaptured, onClose, onCameraFailed, side = 'fr
       ) : (
         <div className="sc-confirm">
           <p>
-            {error || (side === 'back'
-              ? 'Back of the card — the address and GSTIN are usually here.'
-              : 'Readable? Check the phone number and email are sharp.')}
+            {error || (isBack
+              ? 'Address and GSTIN readable?'
+              : 'Name, phone and email readable?')}
           </p>
           <div className="row2">
             <button type="button" className="btn-ghost" onClick={discard} disabled={busy}>Retake</button>
             <button type="button" onClick={() => keep('next')} disabled={busy}>
-              {busy ? 'Saving…' : side === 'back' ? 'Save back' : 'Keep & next'}
+              {busy ? 'Saving…' : isBack ? 'Finish card' : 'Next: the back →'}
             </button>
           </div>
-
-          {side === 'front' && (
-            <>
-              {/* The back is where the address lives on most Indian B2B cards, so this is
-                  one tap away rather than buried. */}
-              <button type="button" className="later" onClick={() => keep('back')} disabled={busy}>
-                Keep &amp; shoot the back →
-              </button>
-              <button type="button" className="later" onClick={() => keep('annotate')} disabled={busy}>
-                Keep and add a note / interest →
-              </button>
-            </>
-          )}
         </div>
       )}
     </div>
